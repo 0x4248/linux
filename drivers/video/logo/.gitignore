@@ -3,4 +3,5 @@
 *_vga16.c
 *_clut224.c
 *_gray256.c
+tmp*
 pnmtologo
