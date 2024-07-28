@@ -490,6 +490,24 @@ int fb_prepare_logo(struct fb_info *info, int rotate)
 	return height;
 }
 
+/* fb_logo_get_count - Get the number of logos to display
+ * @return: Number of logos to display
+ */
+static int fb_logo_get_count(void)
+{
+	unsigned int count;
+#ifdef CONFIG_FB_LOGO_FORCED
+	if (CONFIG_FB_LOGO_SET_NUM == 0){
+		count = fb_logo_count < 0 ? num_online_cpus() : fb_logo_count;
+	} else {
+		count = CONFIG_FB_LOGO_SET_NUM;
+	}
+#else
+	count = fb_logo_count < 0 ? num_online_cpus() : fb_logo_count;
+#endif
+	return count;
+}
+
 int fb_show_logo(struct fb_info *info, int rotate)
 {
 	unsigned int count;
@@ -498,7 +516,7 @@ int fb_show_logo(struct fb_info *info, int rotate)
 	if (!fb_logo_count)
 		return 0;
 
-	count = fb_logo_count < 0 ? num_online_cpus() : fb_logo_count;
+	count = fb_logo_get_count();
 	y = fb_show_logo_line(info, rotate, fb_logo.logo, 0, count);
 #ifdef CONFIG_FB_LOGO_EXTRA
 	y = fb_show_extra_logos(info, y, rotate);

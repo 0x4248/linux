@@ -18,6 +18,27 @@ config FB_LOGO_EXTRA
 	depends on FB=y
 	default y if SPU_BASE
 
+config FB_LOGO_FORCED
+	bool "Force number of logos"
+	depends on FB=y
+	default n
+	help
+	  This option allows you to force the number of logos to be used.
+
+if FB_LOGO_FORCED
+
+config FB_LOGO_SET_NUM
+	int "Number of logos to use"
+	depends on FB=y
+	default 4
+	help
+	  This option allows you to force the number of logos to be used.
+	  If set to 0, the number of logos is determined by the number of
+	  available cpu cores. If set to a value greater than 0, that number
+	  of logos will be used.
+	
+endif # FB_LOGO_FORCED
+
 config LOGO_LINUX_MONO
 	bool "Standard black and white Linux logo"
 	default y
