@@ -177,6 +177,3 @@ sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
-
-# macOS
-.DS_Store
