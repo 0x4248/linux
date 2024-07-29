@@ -6,3 +6,4 @@ This is my modified version of the linux kernel. This repository is just a exper
 
 > [!warning]
 > This is not the official linux kernel repository. Installing this kernel on your system might cause some issues since this is an experimental version of the kernel. This software does not come with any warranty. Use at your own risk.
+> For the official linux kernel repository, visit [kernel.org](https://www.kernel.org/).
