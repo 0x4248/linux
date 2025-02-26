@@ -40,7 +40,7 @@
 #include "gfxhub_v12_0.h"
 #include "mmhub_v4_1_0.h"
 #include "athub_v4_1_0.h"
-
+#include "umc_v8_14.h"
 
 static int gmc_v12_0_ecc_interrupt_state(struct amdgpu_device *adev,
 					 struct amdgpu_irq_src *src,
@@ -137,7 +137,10 @@ static int gmc_v12_0_process_interrupt(struct amdgpu_device *adev,
 		dev_err(adev->dev, "  in page starting at address 0x%016llx from client %d\n",
 				addr, entry->client_id);
 
-		if (!amdgpu_sriov_vf(adev))
+		/* Only print L2 fault status if the status register could be read and
+		 * contains useful information
+		 */
+		if (status != 0)
 			hub->vmhub_funcs->print_l2_protection_fault_status(adev, status);
 	}
 
@@ -299,7 +302,7 @@ static void gmc_v12_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
 	/* This is necessary for SRIOV as well as for GFXOFF to function
 	 * properly under bare metal
 	 */
-	if ((adev->gfx.kiq[0].ring.sched.ready || adev->mes.ring.sched.ready) &&
+	if ((adev->gfx.kiq[0].ring.sched.ready || adev->mes.ring[0].sched.ready) &&
 	    (amdgpu_sriov_runtime(adev) || !amdgpu_sriov_vf(adev))) {
 		struct amdgpu_vmhub *hub = &adev->vmhub[vmhub];
 		const unsigned eng = 17;
@@ -542,6 +545,23 @@ static unsigned gmc_v12_0_get_vbios_fb_size(struct amdgpu_device *adev)
 	return 0;
 }
 
+static unsigned int gmc_v12_0_get_dcc_alignment(struct amdgpu_device *adev)
+{
+	unsigned int max_tex_channel_caches, alignment;
+
+	if (amdgpu_ip_version(adev, GC_HWIP, 0) != IP_VERSION(12, 0, 0) &&
+	    amdgpu_ip_version(adev, GC_HWIP, 0) != IP_VERSION(12, 0, 1))
+		return 0;
+
+	max_tex_channel_caches = adev->gfx.config.max_texture_channel_caches;
+	if (is_power_of_2(max_tex_channel_caches))
+		alignment = (unsigned int)(max_tex_channel_caches / SZ_4);
+	else
+		alignment = roundup_pow_of_two(max_tex_channel_caches);
+
+	return (unsigned int)(alignment * max_tex_channel_caches * SZ_1K);
+}
+
 static const struct amdgpu_gmc_funcs gmc_v12_0_gmc_funcs = {
 	.flush_gpu_tlb = gmc_v12_0_flush_gpu_tlb,
 	.flush_gpu_tlb_pasid = gmc_v12_0_flush_gpu_tlb_pasid,
@@ -551,6 +571,7 @@ static const struct amdgpu_gmc_funcs gmc_v12_0_gmc_funcs = {
 	.get_vm_pde = gmc_v12_0_get_vm_pde,
 	.get_vm_pte = gmc_v12_0_get_vm_pte,
 	.get_vbios_fb_size = gmc_v12_0_get_vbios_fb_size,
+	.get_dcc_alignment = gmc_v12_0_get_dcc_alignment,
 };
 
 static void gmc_v12_0_set_gmc_funcs(struct amdgpu_device *adev)
@@ -560,6 +581,18 @@ static void gmc_v12_0_set_gmc_funcs(struct amdgpu_device *adev)
 
 static void gmc_v12_0_set_umc_funcs(struct amdgpu_device *adev)
 {
+	switch (amdgpu_ip_version(adev, UMC_HWIP, 0)) {
+	case IP_VERSION(8, 14, 0):
+		adev->umc.channel_inst_num = UMC_V8_14_CHANNEL_INSTANCE_NUM;
+		adev->umc.umc_inst_num = UMC_V8_14_UMC_INSTANCE_NUM(adev);
+		adev->umc.node_inst_num = 0;
+		adev->umc.max_ras_err_cnt_per_query = UMC_V8_14_TOTAL_CHANNEL_NUM(adev);
+		adev->umc.channel_offs = UMC_V8_14_PER_CHANNEL_OFFSET;
+		adev->umc.ras = &umc_v8_14_ras;
+		break;
+	default:
+		break;
+	}
 }
 
 
@@ -586,9 +619,9 @@ static void gmc_v12_0_set_gfxhub_funcs(struct amdgpu_device *adev)
 	}
 }
 
-static int gmc_v12_0_early_init(void *handle)
+static int gmc_v12_0_early_init(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	gmc_v12_0_set_gfxhub_funcs(adev);
 	gmc_v12_0_set_mmhub_funcs(adev);
@@ -606,9 +639,9 @@ static int gmc_v12_0_early_init(void *handle)
 	return 0;
 }
 
-static int gmc_v12_0_late_init(void *handle)
+static int gmc_v12_0_late_init(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 	int r;
 
 	r = amdgpu_gmc_allocate_vm_inv_eng(adev);
@@ -713,10 +746,10 @@ static int gmc_v12_0_gart_init(struct amdgpu_device *adev)
 	return amdgpu_gart_table_vram_alloc(adev);
 }
 
-static int gmc_v12_0_sw_init(void *handle)
+static int gmc_v12_0_sw_init(struct amdgpu_ip_block *ip_block)
 {
 	int r, vram_width = 0, vram_type = 0, vram_vendor = 0;
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	adev->mmhub.funcs->init(adev);
 
@@ -808,6 +841,10 @@ static int gmc_v12_0_sw_init(void *handle)
 
 	amdgpu_vm_manager_init(adev);
 
+	r = amdgpu_gmc_ras_sw_init(adev);
+	if (r)
+		return r;
+
 	return 0;
 }
 
@@ -823,9 +860,9 @@ static void gmc_v12_0_gart_fini(struct amdgpu_device *adev)
 	amdgpu_gart_table_vram_free(adev);
 }
 
-static int gmc_v12_0_sw_fini(void *handle)
+static int gmc_v12_0_sw_fini(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	amdgpu_vm_manager_fini(adev);
 	gmc_v12_0_gart_fini(adev);
@@ -876,10 +913,10 @@ static int gmc_v12_0_gart_enable(struct amdgpu_device *adev)
 	return 0;
 }
 
-static int gmc_v12_0_hw_init(void *handle)
+static int gmc_v12_0_hw_init(struct amdgpu_ip_block *ip_block)
 {
 	int r;
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	/* The sequence of these two function calls matters.*/
 	gmc_v12_0_init_golden_registers(adev);
@@ -906,9 +943,9 @@ static void gmc_v12_0_gart_disable(struct amdgpu_device *adev)
 	adev->mmhub.funcs->gart_disable(adev);
 }
 
-static int gmc_v12_0_hw_fini(void *handle)
+static int gmc_v12_0_hw_fini(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	if (amdgpu_sriov_vf(adev)) {
 		/* full access mode, so don't touch any GMC register */
@@ -927,25 +964,22 @@ static int gmc_v12_0_hw_fini(void *handle)
 	return 0;
 }
 
-static int gmc_v12_0_suspend(void *handle)
+static int gmc_v12_0_suspend(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
-
-	gmc_v12_0_hw_fini(adev);
+	gmc_v12_0_hw_fini(ip_block);
 
 	return 0;
 }
 
-static int gmc_v12_0_resume(void *handle)
+static int gmc_v12_0_resume(struct amdgpu_ip_block *ip_block)
 {
 	int r;
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
 
-	r = gmc_v12_0_hw_init(adev);
+	r = gmc_v12_0_hw_init(ip_block);
 	if (r)
 		return r;
 
-	amdgpu_vmid_reset_all(adev);
+	amdgpu_vmid_reset_all(ip_block->adev);
 
 	return 0;
 }
@@ -956,22 +990,17 @@ static bool gmc_v12_0_is_idle(void *handle)
 	return true;
 }
 
-static int gmc_v12_0_wait_for_idle(void *handle)
+static int gmc_v12_0_wait_for_idle(struct amdgpu_ip_block *ip_block)
 {
 	/* There is no need to wait for MC idle in GMC v11.*/
 	return 0;
 }
 
-static int gmc_v12_0_soft_reset(void *handle)
-{
-	return 0;
-}
-
-static int gmc_v12_0_set_clockgating_state(void *handle,
+static int gmc_v12_0_set_clockgating_state(struct amdgpu_ip_block *ip_block,
 					   enum amd_clockgating_state state)
 {
 	int r;
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 
 	r = adev->mmhub.funcs->set_clockgating(adev, state);
 	if (r)
@@ -989,7 +1018,7 @@ static void gmc_v12_0_get_clockgating_state(void *handle, u64 *flags)
 	athub_v4_1_0_get_clockgating(adev, flags);
 }
 
-static int gmc_v12_0_set_powergating_state(void *handle,
+static int gmc_v12_0_set_powergating_state(struct amdgpu_ip_block *ip_block,
 					   enum amd_powergating_state state)
 {
 	return 0;
@@ -1007,7 +1036,6 @@ const struct amd_ip_funcs gmc_v12_0_ip_funcs = {
 	.resume = gmc_v12_0_resume,
 	.is_idle = gmc_v12_0_is_idle,
 	.wait_for_idle = gmc_v12_0_wait_for_idle,
-	.soft_reset = gmc_v12_0_soft_reset,
 	.set_clockgating_state = gmc_v12_0_set_clockgating_state,
 	.set_powergating_state = gmc_v12_0_set_powergating_state,
 	.get_clockgating_state = gmc_v12_0_get_clockgating_state,

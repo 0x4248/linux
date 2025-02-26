@@ -133,19 +133,8 @@ static const struct reg_sequence cs35l41_hda_mute[] = {
 	{ CS35L41_AMP_DIG_VOL_CTRL,	0x0000A678 }, // AMP_HPF_PCM_EN = 1, AMP_VOL_PCM Mute
 };
 
-static void cs35l41_add_controls(struct cs35l41_hda *cs35l41)
-{
-	struct hda_cs_dsp_ctl_info info;
-
-	info.device_name = cs35l41->amp_name;
-	info.fw_type = cs35l41->firmware_type;
-	info.card = cs35l41->codec->card;
-
-	hda_cs_dsp_add_controls(&cs35l41->cs_dsp, &info);
-}
-
 static const struct cs_dsp_client_ops client_ops = {
-	.control_remove = hda_cs_dsp_control_remove,
+	/* cs_dsp requires the client to provide this even if it is empty */
 };
 
 static int cs35l41_request_tuning_param_file(struct cs35l41_hda *cs35l41, char *tuning_filename,
@@ -602,8 +591,6 @@ static int cs35l41_init_dsp(struct cs35l41_hda *cs35l41)
 			      hda_cs_dsp_fw_ids[cs35l41->firmware_type]);
 	if (ret)
 		goto err;
-
-	cs35l41_add_controls(cs35l41);
 
 	cs35l41_hda_apply_calibration(cs35l41);
 
@@ -2032,7 +2019,7 @@ err:
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs35l41_hda_probe, SND_HDA_SCODEC_CS35L41);
+EXPORT_SYMBOL_NS_GPL(cs35l41_hda_probe, "SND_HDA_SCODEC_CS35L41");
 
 void cs35l41_hda_remove(struct device *dev)
 {
@@ -2057,7 +2044,7 @@ void cs35l41_hda_remove(struct device *dev)
 	gpiod_put(cs35l41->cs_gpio);
 	kfree(cs35l41->acpi_subsystem_id);
 }
-EXPORT_SYMBOL_NS_GPL(cs35l41_hda_remove, SND_HDA_SCODEC_CS35L41);
+EXPORT_SYMBOL_NS_GPL(cs35l41_hda_remove, "SND_HDA_SCODEC_CS35L41");
 
 const struct dev_pm_ops cs35l41_hda_pm_ops = {
 	RUNTIME_PM_OPS(cs35l41_runtime_suspend, cs35l41_runtime_resume,
@@ -2065,11 +2052,11 @@ const struct dev_pm_ops cs35l41_hda_pm_ops = {
 	.prepare = cs35l41_system_suspend_prep,
 	SYSTEM_SLEEP_PM_OPS(cs35l41_system_suspend, cs35l41_system_resume)
 };
-EXPORT_SYMBOL_NS_GPL(cs35l41_hda_pm_ops, SND_HDA_SCODEC_CS35L41);
+EXPORT_SYMBOL_NS_GPL(cs35l41_hda_pm_ops, "SND_HDA_SCODEC_CS35L41");
 
 MODULE_DESCRIPTION("CS35L41 HDA Driver");
-MODULE_IMPORT_NS(SND_HDA_CS_DSP_CONTROLS);
-MODULE_IMPORT_NS(SND_SOC_CS_AMP_LIB);
+MODULE_IMPORT_NS("SND_HDA_CS_DSP_CONTROLS");
+MODULE_IMPORT_NS("SND_SOC_CS_AMP_LIB");
 MODULE_AUTHOR("Lucas Tanure, Cirrus Logic Inc, <tanureal@opensource.cirrus.com>");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(FW_CS_DSP);
+MODULE_IMPORT_NS("FW_CS_DSP");

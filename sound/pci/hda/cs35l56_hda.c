@@ -151,10 +151,6 @@ static int cs35l56_hda_runtime_resume(struct device *dev)
 		}
 	}
 
-	ret = cs35l56_force_sync_asp1_registers_from_cache(&cs35l56->base);
-	if (ret)
-		goto err;
-
 	return 0;
 
 err:
@@ -413,7 +409,7 @@ static void cs35l56_hda_remove_controls(struct cs35l56_hda *cs35l56)
 }
 
 static const struct cs_dsp_client_ops cs35l56_hda_client_ops = {
-	.control_remove = hda_cs_dsp_control_remove,
+	/* cs_dsp requires the client to provide this even if it is empty */
 };
 
 static int cs35l56_hda_request_firmware_file(struct cs35l56_hda *cs35l56,
@@ -559,18 +555,6 @@ static void cs35l56_hda_release_firmware_files(const struct firmware *wmfw_firmw
 	kfree(coeff_filename);
 }
 
-static void cs35l56_hda_create_dsp_controls_work(struct work_struct *work)
-{
-	struct cs35l56_hda *cs35l56 = container_of(work, struct cs35l56_hda, control_work);
-	struct hda_cs_dsp_ctl_info info;
-
-	info.device_name = cs35l56->amp_name;
-	info.fw_type = HDA_CS_DSP_FW_MISC;
-	info.card = cs35l56->codec->card;
-
-	hda_cs_dsp_add_controls(&cs35l56->cs_dsp, &info);
-}
-
 static void cs35l56_hda_apply_calibration(struct cs35l56_hda *cs35l56)
 {
 	int ret;
@@ -595,26 +579,15 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 	char *wmfw_filename = NULL;
 	unsigned int preloaded_fw_ver;
 	bool firmware_missing;
-	bool add_dsp_controls_required = false;
 	int ret;
-
-	/*
-	 * control_work must be flushed before proceeding, but we can't do that
-	 * here as it would create a deadlock on controls_rwsem so it must be
-	 * performed before queuing dsp_work.
-	 */
-	WARN_ON_ONCE(work_busy(&cs35l56->control_work));
 
 	/*
 	 * Prepare for a new DSP power-up. If the DSP has had firmware
 	 * downloaded previously then it needs to be powered down so that it
-	 * can be updated and if hadn't been patched before then the controls
-	 * will need to be added once firmware download succeeds.
+	 * can be updated.
 	 */
 	if (cs35l56->base.fw_patched)
 		cs_dsp_power_down(&cs35l56->cs_dsp);
-	else
-		add_dsp_controls_required = true;
 
 	cs35l56->base.fw_patched = false;
 
@@ -698,15 +671,6 @@ static void cs35l56_hda_fw_load(struct cs35l56_hda *cs35l56)
 			  CS35L56_FIRMWARE_MISSING);
 	cs35l56->base.fw_patched = true;
 
-	/*
-	 * Adding controls is deferred to prevent a lock inversion - ALSA takes
-	 * the controls_rwsem when adding a control, the get() / put()
-	 * functions of a control are called holding controls_rwsem and those
-	 * that depend on running firmware wait for dsp_work() to complete.
-	 */
-	if (add_dsp_controls_required)
-		queue_work(system_long_wq, &cs35l56->control_work);
-
 	ret = cs_dsp_run(&cs35l56->cs_dsp);
 	if (ret)
 		dev_dbg(cs35l56->base.dev, "%s: cs_dsp_run ret %d\n", __func__, ret);
@@ -753,7 +717,6 @@ static int cs35l56_hda_bind(struct device *dev, struct device *master, void *mas
 	strscpy(comp->name, dev_name(dev), sizeof(comp->name));
 	comp->playback_hook = cs35l56_hda_playback_hook;
 
-	flush_work(&cs35l56->control_work);
 	queue_work(system_long_wq, &cs35l56->dsp_work);
 
 	cs35l56_hda_create_controls(cs35l56);
@@ -775,7 +738,6 @@ static void cs35l56_hda_unbind(struct device *dev, struct device *master, void *
 	struct hda_component *comp;
 
 	cancel_work_sync(&cs35l56->dsp_work);
-	cancel_work_sync(&cs35l56->control_work);
 
 	cs35l56_hda_remove_controls(cs35l56);
 
@@ -806,7 +768,6 @@ static int cs35l56_hda_system_suspend(struct device *dev)
 	struct cs35l56_hda *cs35l56 = dev_get_drvdata(dev);
 
 	cs35l56_hda_wait_dsp_ready(cs35l56);
-	flush_work(&cs35l56->control_work);
 
 	if (cs35l56->playing)
 		cs35l56_hda_pause(cs35l56);
@@ -1026,7 +987,6 @@ int cs35l56_hda_common_probe(struct cs35l56_hda *cs35l56, int hid, int id)
 	dev_set_drvdata(cs35l56->base.dev, cs35l56);
 
 	INIT_WORK(&cs35l56->dsp_work, cs35l56_hda_dsp_work);
-	INIT_WORK(&cs35l56->control_work, cs35l56_hda_create_dsp_controls_work);
 
 	ret = cs35l56_hda_read_acpi(cs35l56, hid, id);
 	if (ret)
@@ -1039,7 +999,7 @@ int cs35l56_hda_common_probe(struct cs35l56_hda *cs35l56, int hid, int id)
 		goto err;
 	}
 
-	cs35l56->base.cal_index = cs35l56->index;
+	cs35l56->base.cal_index = -1;
 
 	cs35l56_init_cs_dsp(&cs35l56->base, &cs35l56->cs_dsp);
 	cs35l56->cs_dsp.client_ops = &cs35l56_hda_client_ops;
@@ -1095,9 +1055,6 @@ int cs35l56_hda_common_probe(struct cs35l56_hda *cs35l56, int hid, int id)
 
 	regmap_multi_reg_write(cs35l56->base.regmap, cs35l56_hda_dai_config,
 			       ARRAY_SIZE(cs35l56_hda_dai_config));
-	ret = cs35l56_force_sync_asp1_registers_from_cache(&cs35l56->base);
-	if (ret)
-		goto dsp_err;
 
 	/*
 	 * By default only enable one ASP1TXn, where n=amplifier index,
@@ -1123,14 +1080,13 @@ int cs35l56_hda_common_probe(struct cs35l56_hda *cs35l56, int hid, int id)
 
 pm_err:
 	pm_runtime_disable(cs35l56->base.dev);
-dsp_err:
 	cs_dsp_remove(&cs35l56->cs_dsp);
 err:
 	gpiod_set_value_cansleep(cs35l56->base.reset_gpio, 0);
 
 	return ret;
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_hda_common_probe, SND_HDA_SCODEC_CS35L56);
+EXPORT_SYMBOL_NS_GPL(cs35l56_hda_common_probe, "SND_HDA_SCODEC_CS35L56");
 
 void cs35l56_hda_remove(struct device *dev)
 {
@@ -1149,7 +1105,7 @@ void cs35l56_hda_remove(struct device *dev)
 
 	gpiod_set_value_cansleep(cs35l56->base.reset_gpio, 0);
 }
-EXPORT_SYMBOL_NS_GPL(cs35l56_hda_remove, SND_HDA_SCODEC_CS35L56);
+EXPORT_SYMBOL_NS_GPL(cs35l56_hda_remove, "SND_HDA_SCODEC_CS35L56");
 
 const struct dev_pm_ops cs35l56_hda_pm_ops = {
 	RUNTIME_PM_OPS(cs35l56_hda_runtime_suspend, cs35l56_hda_runtime_resume, NULL)
@@ -1159,14 +1115,14 @@ const struct dev_pm_ops cs35l56_hda_pm_ops = {
 	NOIRQ_SYSTEM_SLEEP_PM_OPS(cs35l56_hda_system_suspend_no_irq,
 				  cs35l56_hda_system_resume_no_irq)
 };
-EXPORT_SYMBOL_NS_GPL(cs35l56_hda_pm_ops, SND_HDA_SCODEC_CS35L56);
+EXPORT_SYMBOL_NS_GPL(cs35l56_hda_pm_ops, "SND_HDA_SCODEC_CS35L56");
 
 MODULE_DESCRIPTION("CS35L56 HDA Driver");
-MODULE_IMPORT_NS(FW_CS_DSP);
-MODULE_IMPORT_NS(SND_HDA_CIRRUS_SCODEC);
-MODULE_IMPORT_NS(SND_HDA_CS_DSP_CONTROLS);
-MODULE_IMPORT_NS(SND_SOC_CS35L56_SHARED);
-MODULE_IMPORT_NS(SND_SOC_CS_AMP_LIB);
+MODULE_IMPORT_NS("FW_CS_DSP");
+MODULE_IMPORT_NS("SND_HDA_CIRRUS_SCODEC");
+MODULE_IMPORT_NS("SND_HDA_CS_DSP_CONTROLS");
+MODULE_IMPORT_NS("SND_SOC_CS35L56_SHARED");
+MODULE_IMPORT_NS("SND_SOC_CS_AMP_LIB");
 MODULE_AUTHOR("Richard Fitzgerald <rf@opensource.cirrus.com>");
 MODULE_AUTHOR("Simon Trimmer <simont@opensource.cirrus.com>");
 MODULE_LICENSE("GPL");

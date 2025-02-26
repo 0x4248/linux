@@ -52,6 +52,7 @@ int omnia_cmd_write_read(const struct i2c_client *client,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(omnia_cmd_write_read);
 
 static int omnia_get_version_hash(struct omnia_mcu *mcu, bool bootloader,
 				  char version[static OMNIA_FW_VERSION_HEX_LEN])
@@ -197,8 +198,12 @@ static const struct attribute_group omnia_mcu_base_group = {
 
 static const struct attribute_group *omnia_mcu_groups[] = {
 	&omnia_mcu_base_group,
+#ifdef CONFIG_TURRIS_OMNIA_MCU_GPIO
 	&omnia_mcu_gpio_group,
+#endif
+#ifdef CONFIG_TURRIS_OMNIA_MCU_SYSOFF_WAKEUP
 	&omnia_mcu_poweroff_group,
+#endif
 	NULL
 };
 
@@ -253,6 +258,8 @@ static int omnia_mcu_read_features(struct omnia_mcu *mcu)
 		_DEF_FEAT(NEW_INT_API,		"new interrupt API"),
 		_DEF_FEAT(POWEROFF_WAKEUP,	"poweroff and wakeup"),
 		_DEF_FEAT(TRNG,			"true random number generator"),
+		_DEF_FEAT(BRIGHTNESS_INT,	"LED panel brightness change interrupt"),
+		_DEF_FEAT(LED_GAMMA_CORRECTION,	"LED gamma correction"),
 #undef _DEF_FEAT
 	};
 	struct i2c_client *client = mcu->client;

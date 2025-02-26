@@ -21,6 +21,7 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/of_irq.h>
 #include <linux/regmap.h>
+#include <linux/string_choices.h>
 
 #include "realtek.h"
 #include "realtek-smi.h"
@@ -599,7 +600,7 @@ static int rtl8366rb_setup_cascaded_irq(struct realtek_priv *priv)
 	}
 
 	/* Fetch IRQ edge information from the descriptor */
-	irq_trig = irqd_get_trigger_type(irq_get_irq_data(irq));
+	irq_trig = irq_get_trigger_type(irq);
 	switch (irq_trig) {
 	case IRQF_TRIGGER_RISING:
 	case IRQF_TRIGGER_HIGH:
@@ -1009,8 +1010,8 @@ static int rtl8366rb_setup_all_leds_off(struct realtek_priv *priv)
 
 static int rtl8366rb_setup_leds(struct realtek_priv *priv)
 {
-	struct device_node *leds_np, *led_np;
 	struct dsa_switch *ds = &priv->ds;
+	struct device_node *leds_np;
 	struct dsa_port *dp;
 	int ret = 0;
 
@@ -1025,13 +1026,11 @@ static int rtl8366rb_setup_leds(struct realtek_priv *priv)
 			continue;
 		}
 
-		for_each_child_of_node(leds_np, led_np) {
+		for_each_child_of_node_scoped(leds_np, led_np) {
 			ret = rtl8366rb_setup_led(priv, dp,
 						  of_fwnode_handle(led_np));
-			if (ret) {
-				of_node_put(led_np);
+			if (ret)
 				break;
-			}
 		}
 
 		of_node_put(leds_np);
@@ -1524,7 +1523,7 @@ static int rtl8366rb_vlan_filtering(struct dsa_switch *ds, int port,
 	rb = priv->chip_data;
 
 	dev_dbg(priv->dev, "port %d: %s VLAN filtering\n", port,
-		vlan_filtering ? "enable" : "disable");
+		str_enable_disable(vlan_filtering));
 
 	/* If the port is not in the member set, the frame will be dropped */
 	ret = regmap_update_bits(priv->map, RTL8366RB_VLAN_INGRESS_CTRL2_REG,
@@ -1886,7 +1885,7 @@ static bool rtl8366rb_is_vlan_valid(struct realtek_priv *priv, unsigned int vlan
 
 static int rtl8366rb_enable_vlan(struct realtek_priv *priv, bool enable)
 {
-	dev_dbg(priv->dev, "%s VLAN\n", enable ? "enable" : "disable");
+	dev_dbg(priv->dev, "%s VLAN\n", str_enable_disable(enable));
 	return regmap_update_bits(priv->map,
 				  RTL8366RB_SGCR, RTL8366RB_SGCR_EN_VLAN,
 				  enable ? RTL8366RB_SGCR_EN_VLAN : 0);
@@ -1894,7 +1893,7 @@ static int rtl8366rb_enable_vlan(struct realtek_priv *priv, bool enable)
 
 static int rtl8366rb_enable_vlan4k(struct realtek_priv *priv, bool enable)
 {
-	dev_dbg(priv->dev, "%s VLAN 4k\n", enable ? "enable" : "disable");
+	dev_dbg(priv->dev, "%s VLAN 4k\n", str_enable_disable(enable));
 	return regmap_update_bits(priv->map, RTL8366RB_SGCR,
 				  RTL8366RB_SGCR_EN_VLAN_4KTB,
 				  enable ? RTL8366RB_SGCR_EN_VLAN_4KTB : 0);
@@ -2104,7 +2103,7 @@ static struct platform_driver rtl8366rb_smi_driver = {
 		.of_match_table = rtl8366rb_of_match,
 	},
 	.probe  = realtek_smi_probe,
-	.remove_new = realtek_smi_remove,
+	.remove = realtek_smi_remove,
 	.shutdown = realtek_smi_shutdown,
 };
 
@@ -2146,4 +2145,4 @@ module_exit(rtl8366rb_exit);
 MODULE_AUTHOR("Linus Walleij <linus.walleij@linaro.org>");
 MODULE_DESCRIPTION("Driver for RTL8366RB ethernet switch");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(REALTEK_DSA);
+MODULE_IMPORT_NS("REALTEK_DSA");

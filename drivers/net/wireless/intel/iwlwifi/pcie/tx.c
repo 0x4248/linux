@@ -1449,7 +1449,9 @@ int iwl_pcie_enqueue_hcmd(struct iwl_trans *trans,
 		spin_unlock_irqrestore(&txq->lock, flags);
 
 		IWL_ERR(trans, "No space in command queue\n");
-		iwl_op_mode_cmd_queue_full(trans->op_mode);
+		iwl_op_mode_nic_error(trans->op_mode,
+				      IWL_ERR_TYPE_CMD_QUEUE_FULL);
+		iwl_trans_schedule_reset(trans, IWL_ERR_TYPE_CMD_QUEUE_FULL);
 		idx = -ENOSPC;
 		goto free_dup_buf;
 	}
@@ -1814,23 +1816,31 @@ out:
 /**
  * iwl_pcie_get_sgt_tb_phys - Find TB address in mapped SG list
  * @sgt: scatter gather table
- * @addr: Virtual address
+ * @offset: Offset into the mapped memory (i.e. SKB payload data)
+ * @len: Length of the area
  *
- * Find the entry that includes the address for the given address and return
- * correct physical address for the TB entry.
+ * Find the DMA address that corresponds to the SKB payload data at the
+ * position given by @offset.
  *
  * Returns: Address for TB entry
  */
-dma_addr_t iwl_pcie_get_sgt_tb_phys(struct sg_table *sgt, void *addr)
+dma_addr_t iwl_pcie_get_sgt_tb_phys(struct sg_table *sgt, unsigned int offset,
+				    unsigned int len)
 {
 	struct scatterlist *sg;
+	unsigned int sg_offset = 0;
 	int i;
 
+	/*
+	 * Search the mapped DMA areas in the SG for the area that contains the
+	 * data at offset with the given length.
+	 */
 	for_each_sgtable_dma_sg(sgt, sg, i) {
-		if (addr >= sg_virt(sg) &&
-		    (u8 *)addr < (u8 *)sg_virt(sg) + sg_dma_len(sg))
-			return sg_dma_address(sg) +
-			       ((unsigned long)addr - (unsigned long)sg_virt(sg));
+		if (offset >= sg_offset &&
+		    offset + len <= sg_offset + sg_dma_len(sg))
+			return sg_dma_address(sg) + offset - sg_offset;
+
+		sg_offset += sg_dma_len(sg);
 	}
 
 	WARN_ON_ONCE(1);
@@ -1875,7 +1885,9 @@ struct sg_table *iwl_pcie_prep_tso(struct iwl_trans *trans, struct sk_buff *skb,
 
 	sg_init_table(sgt->sgl, skb_shinfo(skb)->nr_frags + 1);
 
-	sgt->orig_nents = skb_to_sgvec(skb, sgt->sgl, 0, skb->len);
+	/* Only map the data, not the header (it is copied to the TSO page) */
+	sgt->orig_nents = skb_to_sgvec(skb, sgt->sgl, skb_headlen(skb),
+				       skb->data_len);
 	if (WARN_ON_ONCE(sgt->orig_nents <= 0))
 		return NULL;
 
@@ -1900,6 +1912,7 @@ static int iwl_fill_data_tbs_amsdu(struct iwl_trans *trans, struct sk_buff *skb,
 	struct ieee80211_hdr *hdr = (void *)skb->data;
 	unsigned int snap_ip_tcp_hdrlen, ip_hdrlen, total_len, hdr_room;
 	unsigned int mss = skb_shinfo(skb)->gso_size;
+	unsigned int data_offset = 0;
 	u16 length, iv_len, amsdu_pad;
 	dma_addr_t start_hdr_phys;
 	u8 *start_hdr, *pos_hdr;
@@ -2000,7 +2013,7 @@ static int iwl_fill_data_tbs_amsdu(struct iwl_trans *trans, struct sk_buff *skb,
 						  data_left);
 			dma_addr_t tb_phys;
 
-			tb_phys = iwl_pcie_get_sgt_tb_phys(sgt, tso.data);
+			tb_phys = iwl_pcie_get_sgt_tb_phys(sgt, data_offset, size);
 			/* Not a real mapping error, use direct comparison */
 			if (unlikely(tb_phys == DMA_MAPPING_ERROR))
 				return -EINVAL;
@@ -2011,6 +2024,7 @@ static int iwl_fill_data_tbs_amsdu(struct iwl_trans *trans, struct sk_buff *skb,
 						tb_phys, size);
 
 			data_left -= size;
+			data_offset += size;
 			tso_build_data(skb, &tso, size);
 		}
 	}
@@ -2338,6 +2352,10 @@ void iwl_pcie_reclaim(struct iwl_trans *trans, int txq_id, int ssn,
 	txq_read_ptr = txq->read_ptr;
 	txq_write_ptr = txq->write_ptr;
 	spin_unlock(&txq->lock);
+
+	/* There is nothing to do if we are flushing an empty queue */
+	if (is_flush && txq_write_ptr == txq_read_ptr)
+		goto out;
 
 	read_ptr = iwl_txq_get_cmd_index(txq, txq_read_ptr);
 
