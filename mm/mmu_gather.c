@@ -32,7 +32,7 @@ static bool tlb_next_batch(struct mmu_gather *tlb)
 	if (tlb->batch_count == MAX_GATHER_BATCH_COUNT)
 		return false;
 
-	batch = (void *)__get_free_page(GFP_NOWAIT | __GFP_NOWARN);
+	batch = (void *)__get_free_page(GFP_NOWAIT);
 	if (!batch)
 		return false;
 
@@ -246,8 +246,16 @@ static void __tlb_remove_table_free(struct mmu_table_batch *batch)
  * IRQs delays the completion of the TLB flush we can never observe an already
  * freed page.
  *
- * Architectures that do not have this (PPC) need to delay the freeing by some
- * other means, this is that means.
+ * Not all systems IPI every CPU for this purpose:
+ *
+ * - Some architectures have HW support for cross-CPU synchronisation of TLB
+ *   flushes, so there's no IPI at all.
+ *
+ * - Paravirt guests can do this TLB flushing in the hypervisor, or coordinate
+ *   with the hypervisor to defer flushing on preempted vCPUs.
+ *
+ * Such systems need to delay the freeing by some other means, this is that
+ * means.
  *
  * What we do is batch the freed directory pages (tables) and RCU free them.
  * We use the sched RCU variant, as that guarantees that IRQ/preempt disabling
@@ -356,7 +364,7 @@ void tlb_remove_table(struct mmu_gather *tlb, void *table)
 	struct mmu_table_batch **batch = &tlb->batch;
 
 	if (*batch == NULL) {
-		*batch = (struct mmu_table_batch *)__get_free_page(GFP_NOWAIT | __GFP_NOWARN);
+		*batch = (struct mmu_table_batch *)__get_free_page(GFP_NOWAIT);
 		if (*batch == NULL) {
 			tlb_table_invalidate(tlb);
 			tlb_remove_table_one(table);
@@ -416,6 +424,7 @@ static void __tlb_gather_mmu(struct mmu_gather *tlb, struct mm_struct *mm,
 #ifdef CONFIG_MMU_GATHER_PAGE_SIZE
 	tlb->page_size = 0;
 #endif
+	tlb->vma_pfn = 0;
 
 	__tlb_reset_range(tlb);
 	inc_tlb_flush_pending(tlb->mm);

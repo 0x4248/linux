@@ -409,6 +409,7 @@ int libbpf__load_raw_btf(const char *raw_types, size_t types_len,
 int btf_load_into_kernel(struct btf *btf,
 			 char *log_buf, size_t log_sz, __u32 log_level,
 			 int token_fd);
+struct btf *btf_load_from_kernel(__u32 id, struct btf *base_btf, int token_fd);
 
 struct btf *btf_get_from_fd(int btf_fd, struct btf *base_btf);
 void btf_get_kernel_prefix_kind(enum bpf_attach_type attach_type,
@@ -666,6 +667,15 @@ static inline int sys_dup3(int oldfd, int newfd, int flags)
 	return syscall(__NR_dup3, oldfd, newfd, flags);
 }
 
+/* Some versions of Android don't provide memfd_create() in their libc
+ * implementation, so avoid complications and just go straight to Linux
+ * syscall.
+ */
+static inline int sys_memfd_create(const char *name, unsigned flags)
+{
+	return syscall(__NR_memfd_create, name, flags);
+}
+
 /* Point *fixed_fd* to the same file that *tmp_fd* points to.
  * Regardless of success, *tmp_fd* is closed.
  * Whatever *fixed_fd* pointed to is closed silently.
@@ -726,4 +736,8 @@ int elf_resolve_pattern_offsets(const char *binary_path, const char *pattern,
 
 int probe_fd(int fd);
 
+#define SHA256_DIGEST_LENGTH 32
+#define SHA256_DWORD_SIZE SHA256_DIGEST_LENGTH / sizeof(__u64)
+
+void libbpf_sha256(const void *data, size_t len, __u8 out[SHA256_DIGEST_LENGTH]);
 #endif /* __LIBBPF_LIBBPF_INTERNAL_H */

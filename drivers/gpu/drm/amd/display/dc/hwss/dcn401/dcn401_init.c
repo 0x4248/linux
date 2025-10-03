@@ -18,6 +18,7 @@ static const struct hw_sequencer_funcs dcn401_funcs = {
 	.apply_ctx_to_hw = dce110_apply_ctx_to_hw,
 	.apply_ctx_for_surface = NULL,
 	.program_front_end_for_ctx = dcn401_program_front_end_for_ctx,
+	.clear_surface_dcc_and_tiling = dcn10_reset_surface_dcc_and_tiling,
 	.wait_for_pending_cleared = dcn10_wait_for_pending_cleared,
 	.post_unlock_program_front_end = dcn401_post_unlock_program_front_end,
 	.update_plane_addr = dcn20_update_plane_addr,
@@ -103,6 +104,7 @@ static const struct hw_sequencer_funcs dcn401_funcs = {
 	.enable_plane = dcn20_enable_plane,
 	.update_dchubp_dpp = dcn20_update_dchubp_dpp,
 	.post_unlock_reset_opp = dcn20_post_unlock_reset_opp,
+	.get_underflow_debug_data = dcn30_get_underflow_debug_data,
 };
 
 static const struct hwseq_private_funcs dcn401_private_funcs = {
@@ -123,7 +125,7 @@ static const struct hwseq_private_funcs dcn401_private_funcs = {
 	.disable_vga = dcn20_disable_vga,
 	.bios_golden_init = dcn10_bios_golden_init,
 	.plane_atomic_disable = dcn20_plane_atomic_disable,
-	.plane_atomic_power_down = dcn10_plane_atomic_power_down,
+	.plane_atomic_power_down = dcn401_plane_atomic_power_down,
 	.enable_power_gating_plane = dcn32_enable_power_gating_plane,
 	.hubp_pg_control = dcn32_hubp_pg_control,
 	.program_all_writeback_pipes_in_tree = dcn30_program_all_writeback_pipes_in_tree,

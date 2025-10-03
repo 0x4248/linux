@@ -2,7 +2,7 @@
 /*
  * Slab allocator functions that are independent of the allocator strategy
  *
- * (C) 2012 Christoph Lameter <cl@linux.com>
+ * (C) 2012 Christoph Lameter <cl@gentwo.org>
  */
 #include <linux/slab.h>
 
@@ -163,6 +163,9 @@ int slab_unmergeable(struct kmem_cache *s)
 		return 1;
 #endif
 
+	if (s->cpu_sheaves)
+		return 1;
+
 	/*
 	 * We may have set a slab to be unmergeable during bootstrap.
 	 */
@@ -298,6 +301,8 @@ struct kmem_cache *__kmem_cache_create_args(const char *name,
 		static_branch_enable(&slub_debug_enabled);
 	if (flags & SLAB_STORE_USER)
 		stack_depot_init();
+#else
+	flags &= ~SLAB_DEBUG_FLAGS;
 #endif
 
 	mutex_lock(&slab_mutex);
@@ -307,19 +312,10 @@ struct kmem_cache *__kmem_cache_create_args(const char *name,
 		goto out_unlock;
 	}
 
-	/* Refuse requests with allocator specific flags */
 	if (flags & ~SLAB_FLAGS_PERMITTED) {
 		err = -EINVAL;
 		goto out_unlock;
 	}
-
-	/*
-	 * Some allocators will constraint the set of valid flags to a subset
-	 * of all flags. We expect them to define CACHE_CREATE_MASK in this
-	 * case, and we'll just provide them with a sanitized version of the
-	 * passed flags.
-	 */
-	flags &= CACHE_CREATE_MASK;
 
 	/* Fail closed on bad usersize of useroffset values. */
 	if (!IS_ENABLED(CONFIG_HARDENED_USERCOPY) ||
@@ -328,7 +324,7 @@ struct kmem_cache *__kmem_cache_create_args(const char *name,
 		    object_size - args->usersize < args->useroffset))
 		args->usersize = args->useroffset = 0;
 
-	if (!args->usersize)
+	if (!args->usersize && !args->sheaf_capacity)
 		s = __kmem_cache_alias(name, object_size, args->align, flags,
 				       args->ctor);
 	if (s)
@@ -513,6 +509,9 @@ void kmem_cache_destroy(struct kmem_cache *s)
 		 */
 		rcu_barrier();
 	}
+
+	/* Wait for deferred work from kmalloc/kfree_nolock() */
+	defer_free_barrier();
 
 	cpus_read_lock();
 	mutex_lock(&slab_mutex);
@@ -1284,6 +1283,29 @@ EXPORT_TRACEPOINT_SYMBOL(kmem_cache_alloc);
 EXPORT_TRACEPOINT_SYMBOL(kfree);
 EXPORT_TRACEPOINT_SYMBOL(kmem_cache_free);
 
+#ifndef CONFIG_KVFREE_RCU_BATCHED
+
+void kvfree_call_rcu(struct rcu_head *head, void *ptr)
+{
+	if (head) {
+		kasan_record_aux_stack(ptr);
+		call_rcu(head, kvfree_rcu_cb);
+		return;
+	}
+
+	// kvfree_rcu(one_arg) call.
+	might_sleep();
+	synchronize_rcu();
+	kvfree(ptr);
+}
+EXPORT_SYMBOL_GPL(kvfree_call_rcu);
+
+void __init kvfree_rcu_init(void)
+{
+}
+
+#else /* CONFIG_KVFREE_RCU_BATCHED */
+
 /*
  * This rcu parameter is runtime-read-only. It reflects
  * a minimum allowed number of objects which can be cached
@@ -1303,6 +1325,8 @@ module_param(rcu_min_cached_objs, int, 0444);
 // drain their caches.
 static int rcu_delay_page_cache_fill_msec = 5000;
 module_param(rcu_delay_page_cache_fill_msec, int, 0444);
+
+static struct workqueue_struct *rcu_reclaim_wq;
 
 /* Maximum number of jiffies to wait before draining a batch. */
 #define KFREE_DRAIN_JIFFIES (5 * HZ)
@@ -1532,8 +1556,7 @@ kvfree_rcu_list(struct rcu_head *head)
 		rcu_lock_acquire(&rcu_callback_map);
 		trace_rcu_invoke_kvfree_callback("slab", head, offset);
 
-		if (!WARN_ON_ONCE(!__is_kvfree_rcu_offset(offset)))
-			kvfree(ptr);
+		kvfree(ptr);
 
 		rcu_lock_release(&rcu_callback_map);
 		cond_resched_tasks_rcu_qs();
@@ -1588,6 +1611,30 @@ static void kfree_rcu_work(struct work_struct *work)
 		kvfree_rcu_list(head);
 }
 
+static bool kfree_rcu_sheaf(void *obj)
+{
+	struct kmem_cache *s;
+	struct folio *folio;
+	struct slab *slab;
+
+	if (is_vmalloc_addr(obj))
+		return false;
+
+	folio = virt_to_folio(obj);
+	if (unlikely(!folio_test_slab(folio)))
+		return false;
+
+	slab = folio_slab(folio);
+	s = slab->slab_cache;
+	if (s->cpu_sheaves) {
+		if (likely(!IS_ENABLED(CONFIG_NUMA) ||
+			   slab_nid(slab) == numa_mem_id()))
+			return __kfree_rcu_sheaf(s, obj);
+	}
+
+	return false;
+}
+
 static bool
 need_offload_krc(struct kfree_rcu_cpu *krcp)
 {
@@ -1632,10 +1679,10 @@ __schedule_delayed_monitor_work(struct kfree_rcu_cpu *krcp)
 	if (delayed_work_pending(&krcp->monitor_work)) {
 		delay_left = krcp->monitor_work.timer.expires - jiffies;
 		if (delay < delay_left)
-			mod_delayed_work(system_unbound_wq, &krcp->monitor_work, delay);
+			mod_delayed_work(rcu_reclaim_wq, &krcp->monitor_work, delay);
 		return;
 	}
-	queue_delayed_work(system_unbound_wq, &krcp->monitor_work, delay);
+	queue_delayed_work(rcu_reclaim_wq, &krcp->monitor_work, delay);
 }
 
 static void
@@ -1733,7 +1780,7 @@ kvfree_rcu_queue_batch(struct kfree_rcu_cpu *krcp)
 			// "free channels", the batch can handle. Break
 			// the loop since it is done with this CPU thus
 			// queuing an RCU work is _always_ success here.
-			queued = queue_rcu_work(system_unbound_wq, &krwp->rcu_work);
+			queued = queue_rcu_work(rcu_reclaim_wq, &krwp->rcu_work);
 			WARN_ON_ONCE(!queued);
 			break;
 		}
@@ -1861,8 +1908,6 @@ add_ptr_to_bulk_krc_lock(struct kfree_rcu_cpu **krcp,
 	return true;
 }
 
-#if !defined(CONFIG_TINY_RCU)
-
 static enum hrtimer_restart
 schedule_page_work_fn(struct hrtimer *t)
 {
@@ -1883,12 +1928,12 @@ run_page_cache_worker(struct kfree_rcu_cpu *krcp)
 	if (rcu_scheduler_active == RCU_SCHEDULER_RUNNING &&
 			!atomic_xchg(&krcp->work_in_progress, 1)) {
 		if (atomic_read(&krcp->backoff_page_cache_fill)) {
-			queue_delayed_work(system_unbound_wq,
+			queue_delayed_work(rcu_reclaim_wq,
 				&krcp->page_cache_work,
 					msecs_to_jiffies(rcu_delay_page_cache_fill_msec));
 		} else {
-			hrtimer_init(&krcp->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-			krcp->hrtimer.function = schedule_page_work_fn;
+			hrtimer_setup(&krcp->hrtimer, schedule_page_work_fn, CLOCK_MONOTONIC,
+				      HRTIMER_MODE_REL);
 			hrtimer_start(&krcp->hrtimer, 0, HRTIMER_MODE_REL);
 		}
 	}
@@ -1933,6 +1978,9 @@ void kvfree_call_rcu(struct rcu_head *head, void *ptr)
 	 */
 	if (!head)
 		might_sleep();
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT) && kfree_rcu_sheaf(ptr))
+		return;
 
 	// Queue the object but don't yet schedule the batch.
 	if (debug_rcu_head_queue(ptr)) {
@@ -2008,6 +2056,8 @@ void kvfree_rcu_barrier(void)
 	bool queued;
 	int i, cpu;
 
+	flush_all_rcu_sheaves();
+
 	/*
 	 * Firstly we detach objects and queue them over an RCU-batch
 	 * for all CPUs. Finally queued works are flushed for each CPU.
@@ -2071,8 +2121,6 @@ void kvfree_rcu_barrier(void)
 }
 EXPORT_SYMBOL_GPL(kvfree_rcu_barrier);
 
-#endif /* #if !defined(CONFIG_TINY_RCU) */
-
 static unsigned long
 kfree_rcu_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
 {
@@ -2120,6 +2168,10 @@ void __init kvfree_rcu_init(void)
 	int i, j;
 	struct shrinker *kfree_rcu_shrinker;
 
+	rcu_reclaim_wq = alloc_workqueue("kvfree_rcu_reclaim",
+			WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	WARN_ON(!rcu_reclaim_wq);
+
 	/* Clamp it to [0:100] seconds interval. */
 	if (rcu_delay_page_cache_fill_msec < 0 ||
 		rcu_delay_page_cache_fill_msec > 100 * MSEC_PER_SEC) {
@@ -2162,3 +2214,6 @@ void __init kvfree_rcu_init(void)
 
 	shrinker_register(kfree_rcu_shrinker);
 }
+
+#endif /* CONFIG_KVFREE_RCU_BATCHED */
+

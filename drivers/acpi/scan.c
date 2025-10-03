@@ -845,6 +845,8 @@ static bool acpi_info_matches_ids(struct acpi_device_info *info,
 static const char * const acpi_ignore_dep_ids[] = {
 	"PNP0D80", /* Windows-compatible System Power Management Controller */
 	"INT33BD", /* Intel Baytrail Mailbox Device */
+	"INTC10DE", /* Intel CVS LNL */
+	"INTC10E0", /* Intel CVS ARL */
 	"LATT2021", /* Lattice FW Update Client Driver */
 	NULL
 };
@@ -1631,13 +1633,6 @@ static int acpi_iommu_configure_id(struct device *dev, const u32 *id_in)
 	if (err && err != -EPROBE_DEFER)
 		err = viot_iommu_configure(dev);
 	mutex_unlock(&iommu_probe_device_lock);
-
-	/*
-	 * If we have reason to believe the IOMMU driver missed the initial
-	 * iommu_probe_device() call for dev, replay it to get things in order.
-	 */
-	if (!err && dev->bus)
-		err = iommu_probe_device(dev);
 
 	return err;
 }
@@ -2709,6 +2704,7 @@ void __init acpi_scan_init(void)
 	acpi_memory_hotplug_init();
 	acpi_watchdog_init();
 	acpi_pnp_init();
+	acpi_power_resources_init();
 	acpi_int340x_thermal_init();
 	acpi_init_lpit();
 

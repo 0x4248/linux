@@ -504,7 +504,9 @@ static void gmc_v7_0_get_vm_pde(struct amdgpu_device *adev, int level,
 }
 
 static void gmc_v7_0_get_vm_pte(struct amdgpu_device *adev,
-				struct amdgpu_bo_va_mapping *mapping,
+				struct amdgpu_vm *vm,
+				struct amdgpu_bo *bo,
+				uint32_t vm_flags,
 				uint64_t *flags)
 {
 	*flags &= ~AMDGPU_PTE_EXECUTABLE;
@@ -1142,9 +1144,9 @@ static int gmc_v7_0_resume(struct amdgpu_ip_block *ip_block)
 	return 0;
 }
 
-static bool gmc_v7_0_is_idle(void *handle)
+static bool gmc_v7_0_is_idle(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 	u32 tmp = RREG32(mmSRBM_STATUS);
 
 	if (tmp & (SRBM_STATUS__MCB_BUSY_MASK | SRBM_STATUS__MCB_NON_DISPLAY_BUSY_MASK |
@@ -1157,17 +1159,10 @@ static bool gmc_v7_0_is_idle(void *handle)
 static int gmc_v7_0_wait_for_idle(struct amdgpu_ip_block *ip_block)
 {
 	unsigned int i;
-	u32 tmp;
 	struct amdgpu_device *adev = ip_block->adev;
 
 	for (i = 0; i < adev->usec_timeout; i++) {
-		/* read MC_STATUS */
-		tmp = RREG32(mmSRBM_STATUS) & (SRBM_STATUS__MCB_BUSY_MASK |
-					       SRBM_STATUS__MCB_NON_DISPLAY_BUSY_MASK |
-					       SRBM_STATUS__MCC_BUSY_MASK |
-					       SRBM_STATUS__MCD_BUSY_MASK |
-					       SRBM_STATUS__VMC_BUSY_MASK);
-		if (!tmp)
+		if (gmc_v7_0_is_idle(ip_block))
 			return 0;
 		udelay(1);
 	}

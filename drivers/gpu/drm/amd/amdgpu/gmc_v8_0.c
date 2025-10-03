@@ -716,11 +716,15 @@ static void gmc_v8_0_get_vm_pde(struct amdgpu_device *adev, int level,
 }
 
 static void gmc_v8_0_get_vm_pte(struct amdgpu_device *adev,
-				struct amdgpu_bo_va_mapping *mapping,
+				struct amdgpu_vm *vm,
+				struct amdgpu_bo *bo,
+				uint32_t vm_flags,
 				uint64_t *flags)
 {
-	*flags &= ~AMDGPU_PTE_EXECUTABLE;
-	*flags |= mapping->flags & AMDGPU_PTE_EXECUTABLE;
+	if (vm_flags & AMDGPU_VM_PAGE_EXECUTABLE)
+		*flags |= AMDGPU_PTE_EXECUTABLE;
+	else
+		*flags &= ~AMDGPU_PTE_EXECUTABLE;
 	*flags &= ~AMDGPU_PTE_PRT;
 }
 
@@ -1263,9 +1267,9 @@ static int gmc_v8_0_resume(struct amdgpu_ip_block *ip_block)
 	return 0;
 }
 
-static bool gmc_v8_0_is_idle(void *handle)
+static bool gmc_v8_0_is_idle(struct amdgpu_ip_block *ip_block)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 	u32 tmp = RREG32(mmSRBM_STATUS);
 
 	if (tmp & (SRBM_STATUS__MCB_BUSY_MASK | SRBM_STATUS__MCB_NON_DISPLAY_BUSY_MASK |
@@ -1458,9 +1462,7 @@ static int gmc_v8_0_process_interrupt(struct amdgpu_device *adev,
 
 		task_info = amdgpu_vm_get_task_info_pasid(adev, entry->pasid);
 		if (task_info) {
-			dev_err(adev->dev, " for process %s pid %d thread %s pid %d\n",
-				task_info->process_name, task_info->tgid,
-				task_info->task_name, task_info->pid);
+			amdgpu_vm_print_task_info(adev, task_info);
 			amdgpu_vm_put_task_info(task_info);
 		}
 
@@ -1686,9 +1688,9 @@ static int gmc_v8_0_set_powergating_state(struct amdgpu_ip_block *ip_block,
 	return 0;
 }
 
-static void gmc_v8_0_get_clockgating_state(void *handle, u64 *flags)
+static void gmc_v8_0_get_clockgating_state(struct amdgpu_ip_block *ip_block, u64 *flags)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
+	struct amdgpu_device *adev = ip_block->adev;
 	int data;
 
 	if (amdgpu_sriov_vf(adev))

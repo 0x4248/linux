@@ -276,28 +276,41 @@ int move_addr_to_kernel(void __user *uaddr, int ulen, struct sockaddr_storage *k
 static int move_addr_to_user(struct sockaddr_storage *kaddr, int klen,
 			     void __user *uaddr, int __user *ulen)
 {
-	int err;
 	int len;
 
 	BUG_ON(klen > sizeof(struct sockaddr_storage));
-	err = get_user(len, ulen);
-	if (err)
-		return err;
+
+	if (can_do_masked_user_access())
+		ulen = masked_user_access_begin(ulen);
+	else if (!user_access_begin(ulen, 4))
+		return -EFAULT;
+
+	unsafe_get_user(len, ulen, efault_end);
+
 	if (len > klen)
 		len = klen;
-	if (len < 0)
-		return -EINVAL;
+	/*
+	 *      "fromlen shall refer to the value before truncation.."
+	 *                      1003.1g
+	 */
+	if (len >= 0)
+		unsafe_put_user(klen, ulen, efault_end);
+
+	user_access_end();
+
 	if (len) {
+		if (len < 0)
+			return -EINVAL;
 		if (audit_sockaddr(klen, kaddr))
 			return -ENOMEM;
 		if (copy_to_user(uaddr, kaddr, len))
 			return -EFAULT;
 	}
-	/*
-	 *      "fromlen shall refer to the value before truncation.."
-	 *                      1003.1g
-	 */
-	return __put_user(klen, ulen);
+	return 0;
+
+efault_end:
+	user_access_end();
+	return -EFAULT;
 }
 
 static struct kmem_cache *sock_inode_cachep __ro_after_init;
@@ -592,10 +605,12 @@ static int sockfs_setattr(struct mnt_idmap *idmap,
 	if (!err && (iattr->ia_valid & ATTR_UID)) {
 		struct socket *sock = SOCKET_I(d_inode(dentry));
 
-		if (sock->sk)
-			sock->sk->sk_uid = iattr->ia_uid;
-		else
+		if (sock->sk) {
+			/* Paired with READ_ONCE() in sk_uid() */
+			WRITE_ONCE(sock->sk->sk_uid, iattr->ia_uid);
+		} else {
 			err = -ENOENT;
+		}
 	}
 
 	return err;
@@ -680,23 +695,17 @@ void __sock_tx_timestamp(__u32 tsflags, __u8 *tx_flags)
 {
 	u8 flags = *tx_flags;
 
-	if (tsflags & SOF_TIMESTAMPING_TX_HARDWARE) {
-		flags |= SKBTX_HW_TSTAMP;
-
-		/* PTP hardware clocks can provide a free running cycle counter
-		 * as a time base for virtual clocks. Tell driver to use the
-		 * free running cycle counter for timestamp if socket is bound
-		 * to virtual clock.
-		 */
-		if (tsflags & SOF_TIMESTAMPING_BIND_PHC)
-			flags |= SKBTX_HW_TSTAMP_USE_CYCLES;
-	}
+	if (tsflags & SOF_TIMESTAMPING_TX_HARDWARE)
+		flags |= SKBTX_HW_TSTAMP_NOBPF;
 
 	if (tsflags & SOF_TIMESTAMPING_TX_SOFTWARE)
 		flags |= SKBTX_SW_TSTAMP;
 
 	if (tsflags & SOF_TIMESTAMPING_TX_SCHED)
 		flags |= SKBTX_SCHED_TSTAMP;
+
+	if (tsflags & SOF_TIMESTAMPING_TX_COMPLETION)
+		flags |= SKBTX_COMPLETION_TSTAMP;
 
 	*tx_flags = flags;
 }
@@ -847,6 +856,52 @@ static void put_ts_pktinfo(struct msghdr *msg, struct sk_buff *skb,
 	ts_pktinfo.pkt_length = skb->len - skb_mac_offset(skb);
 	put_cmsg(msg, SOL_SOCKET, SCM_TIMESTAMPING_PKTINFO,
 		 sizeof(ts_pktinfo), &ts_pktinfo);
+}
+
+bool skb_has_tx_timestamp(struct sk_buff *skb, const struct sock *sk)
+{
+	const struct sock_exterr_skb *serr = SKB_EXT_ERR(skb);
+	u32 tsflags = READ_ONCE(sk->sk_tsflags);
+
+	if (serr->ee.ee_errno != ENOMSG ||
+	   serr->ee.ee_origin != SO_EE_ORIGIN_TIMESTAMPING)
+		return false;
+
+	/* software time stamp available and wanted */
+	if ((tsflags & SOF_TIMESTAMPING_SOFTWARE) && skb->tstamp)
+		return true;
+	/* hardware time stamps available and wanted */
+	return (tsflags & SOF_TIMESTAMPING_RAW_HARDWARE) &&
+		skb_hwtstamps(skb)->hwtstamp;
+}
+
+int skb_get_tx_timestamp(struct sk_buff *skb, struct sock *sk,
+			  struct timespec64 *ts)
+{
+	u32 tsflags = READ_ONCE(sk->sk_tsflags);
+	ktime_t hwtstamp;
+	int if_index = 0;
+
+	if ((tsflags & SOF_TIMESTAMPING_SOFTWARE) &&
+	    ktime_to_timespec64_cond(skb->tstamp, ts))
+		return SOF_TIMESTAMPING_TX_SOFTWARE;
+
+	if (!(tsflags & SOF_TIMESTAMPING_RAW_HARDWARE) ||
+	    skb_is_swtx_tstamp(skb, false))
+		return -ENOENT;
+
+	if (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP_NETDEV)
+		hwtstamp = get_timestamp(sk, skb, &if_index);
+	else
+		hwtstamp = skb_hwtstamps(skb)->hwtstamp;
+
+	if (tsflags & SOF_TIMESTAMPING_BIND_PHC)
+		hwtstamp = ptp_convert_timestamp(&hwtstamp,
+						READ_ONCE(sk->sk_bind_phc));
+	if (!ktime_to_timespec64_cond(hwtstamp, ts))
+		return -ENOENT;
+
+	return SOF_TIMESTAMPING_TX_HARDWARE;
 }
 
 /*
@@ -1134,6 +1189,9 @@ static ssize_t sock_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (sock->type == SOCK_SEQPACKET)
 		msg.msg_flags |= MSG_EOR;
 
+	if (iocb->ki_flags & IOCB_NOSIGNAL)
+		msg.msg_flags |= MSG_NOSIGNAL;
+
 	res = __sock_sendmsg(sock, &msg);
 	*from = msg.msg_iter;
 	return res;
@@ -1145,12 +1203,10 @@ static ssize_t sock_write_iter(struct kiocb *iocb, struct iov_iter *from)
  */
 
 static DEFINE_MUTEX(br_ioctl_mutex);
-static int (*br_ioctl_hook)(struct net *net, struct net_bridge *br,
-			    unsigned int cmd, struct ifreq *ifr,
+static int (*br_ioctl_hook)(struct net *net, unsigned int cmd,
 			    void __user *uarg);
 
-void brioctl_set(int (*hook)(struct net *net, struct net_bridge *br,
-			     unsigned int cmd, struct ifreq *ifr,
+void brioctl_set(int (*hook)(struct net *net, unsigned int cmd,
 			     void __user *uarg))
 {
 	mutex_lock(&br_ioctl_mutex);
@@ -1159,8 +1215,7 @@ void brioctl_set(int (*hook)(struct net *net, struct net_bridge *br,
 }
 EXPORT_SYMBOL(brioctl_set);
 
-int br_ioctl_call(struct net *net, struct net_bridge *br, unsigned int cmd,
-		  struct ifreq *ifr, void __user *uarg)
+int br_ioctl_call(struct net *net, unsigned int cmd, void __user *uarg)
 {
 	int err = -ENOPKG;
 
@@ -1169,7 +1224,7 @@ int br_ioctl_call(struct net *net, struct net_bridge *br, unsigned int cmd,
 
 	mutex_lock(&br_ioctl_mutex);
 	if (br_ioctl_hook)
-		err = br_ioctl_hook(net, br, cmd, ifr, uarg);
+		err = br_ioctl_hook(net, cmd, uarg);
 	mutex_unlock(&br_ioctl_mutex);
 
 	return err;
@@ -1269,7 +1324,9 @@ static long sock_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		case SIOCSIFBR:
 		case SIOCBRADDBR:
 		case SIOCBRDELBR:
-			err = br_ioctl_call(net, NULL, cmd, NULL, argp);
+		case SIOCBRADDIF:
+		case SIOCBRDELIF:
+			err = br_ioctl_call(net, cmd, argp);
 			break;
 		case SIOCGIFVLAN:
 		case SIOCSIFVLAN:
@@ -3429,6 +3486,8 @@ static int compat_sock_ioctl_trans(struct file *file, struct socket *sock,
 	case SIOCGPGRP:
 	case SIOCBRADDBR:
 	case SIOCBRDELBR:
+	case SIOCBRADDIF:
+	case SIOCBRDELIF:
 	case SIOCGIFVLAN:
 	case SIOCSIFVLAN:
 	case SIOCGSKNS:
@@ -3468,8 +3527,6 @@ static int compat_sock_ioctl_trans(struct file *file, struct socket *sock,
 	case SIOCGIFPFLAGS:
 	case SIOCGIFTXQLEN:
 	case SIOCSIFTXQLEN:
-	case SIOCBRADDIF:
-	case SIOCBRDELIF:
 	case SIOCGIFNAME:
 	case SIOCSIFNAME:
 	case SIOCGMIIPHY:

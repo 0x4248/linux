@@ -101,8 +101,8 @@ struct stmmac_rxq_stats {
 /* Updates on each CPU protected by not allowing nested irqs. */
 struct stmmac_pcpu_stats {
 	struct u64_stats_sync syncp;
-	u64_stats_t rx_normal_irq_n[MTL_MAX_TX_QUEUES];
-	u64_stats_t tx_normal_irq_n[MTL_MAX_RX_QUEUES];
+	u64_stats_t rx_normal_irq_n[MTL_MAX_RX_QUEUES];
+	u64_stats_t tx_normal_irq_n[MTL_MAX_TX_QUEUES];
 };
 
 /* Extra statistic and debug information exposed by ethtool */
@@ -228,6 +228,7 @@ struct stmmac_extra_stats {
 	unsigned long mtl_est_btrlm;
 	unsigned long max_sdu_txq_drop[MTL_MAX_TX_QUEUES];
 	unsigned long mtl_est_txq_hlbf[MTL_MAX_TX_QUEUES];
+	unsigned long mtl_est_txq_hlbs[MTL_MAX_TX_QUEUES];
 	/* per queue statistics */
 	struct stmmac_txq_stats txq_stats[MTL_MAX_TX_QUEUES];
 	struct stmmac_rxq_stats rxq_stats[MTL_MAX_RX_QUEUES];
@@ -396,17 +397,6 @@ enum request_irq_err {
 
 #define CORE_IRQ_MTL_RX_OVERFLOW	BIT(8)
 
-/* Physical Coding Sublayer */
-struct rgmii_adv {
-	unsigned int pause;
-	unsigned int duplex;
-	unsigned int lp_pause;
-	unsigned int lp_duplex;
-};
-
-#define STMMAC_PCS_PAUSE	1
-#define STMMAC_PCS_ASYM_PAUSE	2
-
 /* DMA HW capabilities */
 struct dma_features {
 	unsigned int mbps_10_100;
@@ -530,6 +520,20 @@ struct dma_features {
 #define STMMAC_DEFAULT_TWT_LS	0x1E
 #define STMMAC_ET_MAX		0xFFFFF
 
+/* Common LPI register bits */
+#define LPI_CTRL_STATUS_LPITCSE	BIT(21)	/* LPI Tx Clock Stop Enable, gmac4, xgmac2 only */
+#define LPI_CTRL_STATUS_LPIATE	BIT(20)	/* LPI Timer Enable, gmac4 only */
+#define LPI_CTRL_STATUS_LPITXA	BIT(19)	/* Enable LPI TX Automate */
+#define LPI_CTRL_STATUS_PLSEN	BIT(18)	/* Enable PHY Link Status */
+#define LPI_CTRL_STATUS_PLS	BIT(17)	/* PHY Link Status */
+#define LPI_CTRL_STATUS_LPIEN	BIT(16)	/* LPI Enable */
+#define LPI_CTRL_STATUS_RLPIST	BIT(9)	/* Receive LPI state, gmac1000 only? */
+#define LPI_CTRL_STATUS_TLPIST	BIT(8)	/* Transmit LPI state, gmac1000 only? */
+#define LPI_CTRL_STATUS_RLPIEX	BIT(3)	/* Receive LPI Exit */
+#define LPI_CTRL_STATUS_RLPIEN	BIT(2)	/* Receive LPI Entry */
+#define LPI_CTRL_STATUS_TLPIEX	BIT(1)	/* Transmit LPI Exit */
+#define LPI_CTRL_STATUS_TLPIEN	BIT(0)	/* Transmit LPI Entry */
+
 #define STMMAC_CHAIN_MODE	0x1
 #define STMMAC_RING_MODE	0x2
 
@@ -588,6 +592,7 @@ struct mac_device_info {
 	const struct stmmac_tc_ops *tc;
 	const struct stmmac_mmc_ops *mmc;
 	const struct stmmac_est_ops *est;
+	const struct stmmac_vlan_ops *vlan;
 	struct dw_xpcs *xpcs;
 	struct phylink_pcs *phylink_pcs;
 	struct mii_regs mii;	/* MII register Addresses */
@@ -598,7 +603,6 @@ struct mac_device_info {
 	unsigned int mcast_bits_log2;
 	unsigned int rx_csum;
 	unsigned int pcs;
-	unsigned int pmt;
 	unsigned int ps;
 	unsigned int xlgmac;
 	unsigned int num_vlan;

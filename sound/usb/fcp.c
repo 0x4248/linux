@@ -820,7 +820,6 @@ static long fcp_hwdep_read(struct snd_hwdep *hw, char __user *buf,
 {
 	struct usb_mixer_interface *mixer = hw->private_data;
 	struct fcp_data *private = mixer->private_data;
-	unsigned long flags;
 	long ret = 0;
 	u32 event;
 
@@ -832,10 +831,10 @@ static long fcp_hwdep_read(struct snd_hwdep *hw, char __user *buf,
 	if (ret)
 		return ret;
 
-	spin_lock_irqsave(&private->notify.lock, flags);
-	event = private->notify.event;
-	private->notify.event = 0;
-	spin_unlock_irqrestore(&private->notify.lock, flags);
+	scoped_guard(spinlock_irqsave, &private->notify.lock) {
+		event = private->notify.event;
+		private->notify.event = 0;
+	}
 
 	if (copy_to_user(buf, &event, sizeof(event)))
 		return -EFAULT;
@@ -946,11 +945,9 @@ static void fcp_notify(struct urb *urb)
 	}
 
 	if (data) {
-		unsigned long flags;
-
-		spin_lock_irqsave(&private->notify.lock, flags);
-		private->notify.event |= data;
-		spin_unlock_irqrestore(&private->notify.lock, flags);
+		scoped_guard(spinlock_irqsave, &private->notify.lock) {
+			private->notify.event |= data;
+		}
 
 		wake_up_interruptible(&private->notify.queue);
 	}
@@ -1092,8 +1089,7 @@ static int fcp_find_fc_interface(struct usb_mixer_interface *mixer)
 
 		epd = get_endpoint(intf->altsetting, 0);
 		private->bInterfaceNumber = desc->bInterfaceNumber;
-		private->bEndpointAddress = epd->bEndpointAddress &
-			USB_ENDPOINT_NUMBER_MASK;
+		private->bEndpointAddress = usb_endpoint_num(epd);
 		private->wMaxPacketSize = le16_to_cpu(epd->wMaxPacketSize);
 		private->bInterval = epd->bInterval;
 		return 0;

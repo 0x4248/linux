@@ -44,7 +44,7 @@ void hubp31_set_unbounded_requesting(struct hubp *hubp, bool enable)
 	struct dcn20_hubp *hubp2 = TO_DCN20_HUBP(hubp);
 
 	REG_UPDATE(DCHUBP_CNTL, HUBP_UNBOUNDED_REQ_MODE, enable);
-	REG_UPDATE(CURSOR_CONTROL, CURSOR_REQ_MODE, enable);
+	REG_UPDATE(CURSOR_CONTROL, CURSOR_REQ_MODE, 1);
 }
 
 void hubp31_soft_reset(struct hubp *hubp, bool reset)
@@ -66,6 +66,18 @@ void hubp31_program_extended_blank_value(
 	struct hubp *hubp, unsigned int min_dst_y_next_start_optimized)
 {
 	hubp31_program_extended_blank(hubp, min_dst_y_next_start_optimized);
+}
+
+uint32_t hubp31_get_det_config_error(struct hubp *hubp)
+{
+	uint32_t config_error = 0;
+	struct dcn20_hubp *hubp2 = TO_DCN20_HUBP(hubp);
+
+	REG_GET(DCHUBP_CNTL,
+		HUBP_SEG_ALLOC_ERR_STATUS,
+		&config_error);
+
+	return config_error;
 }
 
 static struct hubp_funcs dcn31_hubp_funcs = {
@@ -98,6 +110,9 @@ static struct hubp_funcs dcn31_hubp_funcs = {
 	.hubp_in_blank = hubp1_in_blank,
 	.program_extended_blank = hubp31_program_extended_blank,
 	.hubp_clear_tiling = hubp3_clear_tiling,
+	.hubp_get_underflow_status = hubp3_get_underflow_status,
+	.hubp_get_current_read_line = hubp3_get_current_read_line,
+	.hubp_get_det_config_error = hubp31_get_det_config_error,
 };
 
 bool hubp31_construct(

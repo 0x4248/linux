@@ -188,24 +188,18 @@ static void rz_ssi_set_substream(struct rz_ssi_stream *strm,
 				 struct snd_pcm_substream *substream)
 {
 	struct rz_ssi_priv *ssi = strm->priv;
-	unsigned long flags;
 
-	spin_lock_irqsave(&ssi->lock, flags);
+	guard(spinlock_irqsave)(&ssi->lock);
+
 	strm->substream = substream;
-	spin_unlock_irqrestore(&ssi->lock, flags);
 }
 
 static bool rz_ssi_stream_is_valid(struct rz_ssi_priv *ssi,
 				   struct rz_ssi_stream *strm)
 {
-	unsigned long flags;
-	bool ret;
+	guard(spinlock_irqsave)(&ssi->lock);
 
-	spin_lock_irqsave(&ssi->lock, flags);
-	ret = strm->substream && strm->substream->runtime;
-	spin_unlock_irqrestore(&ssi->lock, flags);
-
-	return ret;
+	return strm->substream && strm->substream->runtime;
 }
 
 static inline bool rz_ssi_is_stream_running(struct rz_ssi_stream *strm)
@@ -1244,7 +1238,7 @@ static int rz_ssi_runtime_resume(struct device *dev)
 
 static const struct dev_pm_ops rz_ssi_pm_ops = {
 	RUNTIME_PM_OPS(rz_ssi_runtime_suspend, rz_ssi_runtime_resume, NULL)
-	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
 };
 
 static struct platform_driver rz_ssi_driver = {

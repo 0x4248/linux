@@ -529,7 +529,7 @@ software_node_get_reference_args(const struct fwnode_handle *fwnode,
 	if (prop->is_inline)
 		return -EINVAL;
 
-	if (index * sizeof(*ref) >= prop->length)
+	if ((index + 1) * sizeof(*ref) > prop->length)
 		return -ENOENT;
 
 	ref_array = prop->pointer;
@@ -844,7 +844,7 @@ swnode_register(const struct software_node *node, struct swnode *parent,
  * of this function or by ordering the array such that parent comes before
  * child.
  */
-int software_node_register_node_group(const struct software_node **node_group)
+int software_node_register_node_group(const struct software_node * const *node_group)
 {
 	unsigned int i;
 	int ret;
@@ -877,8 +877,7 @@ EXPORT_SYMBOL_GPL(software_node_register_node_group);
  * remove the nodes individually, in the correct order (child before
  * parent).
  */
-void software_node_unregister_node_group(
-		const struct software_node **node_group)
+void software_node_unregister_node_group(const struct software_node * const *node_group)
 {
 	unsigned int i = 0;
 
@@ -1080,6 +1079,7 @@ void software_node_notify(struct device *dev)
 	if (!swnode)
 		return;
 
+	kobject_get(&swnode->kobj);
 	ret = sysfs_create_link(&dev->kobj, &swnode->kobj, "software_node");
 	if (ret)
 		return;
@@ -1089,8 +1089,6 @@ void software_node_notify(struct device *dev)
 		sysfs_remove_link(&dev->kobj, "software_node");
 		return;
 	}
-
-	kobject_get(&swnode->kobj);
 }
 
 void software_node_notify_remove(struct device *dev)

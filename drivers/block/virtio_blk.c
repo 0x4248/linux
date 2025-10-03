@@ -226,7 +226,7 @@ static int virtblk_map_data(struct blk_mq_hw_ctx *hctx, struct request *req,
 	if (unlikely(err))
 		return -ENOMEM;
 
-	return blk_rq_map_sg(hctx->queue, req, vbr->sg_table.sgl);
+	return blk_rq_map_sg(req, vbr->sg_table.sgl);
 }
 
 static void virtblk_cleanup_cmd(struct request *req)
@@ -571,7 +571,7 @@ static int virtblk_submit_zone_report(struct virtio_blk *vblk,
 	vbr->out_hdr.type = cpu_to_virtio32(vblk->vdev, VIRTIO_BLK_T_ZONE_REPORT);
 	vbr->out_hdr.sector = cpu_to_virtio64(vblk->vdev, sector);
 
-	err = blk_rq_map_kern(q, req, report_buf, report_len, GFP_KERNEL);
+	err = blk_rq_map_kern(req, report_buf, report_len, GFP_KERNEL);
 	if (err)
 		goto out;
 
@@ -817,7 +817,7 @@ static int virtblk_get_id(struct gendisk *disk, char *id_str)
 	vbr->out_hdr.type = cpu_to_virtio32(vblk->vdev, VIRTIO_BLK_T_GET_ID);
 	vbr->out_hdr.sector = 0;
 
-	err = blk_rq_map_kern(q, req, id_str, VIRTIO_BLK_ID_BYTES, GFP_KERNEL);
+	err = blk_rq_map_kern(req, id_str, VIRTIO_BLK_ID_BYTES, GFP_KERNEL);
 	if (err)
 		goto out;
 
@@ -829,9 +829,9 @@ out:
 }
 
 /* We provide getgeo only to please some old bootloader/partitioning tools */
-static int virtblk_getgeo(struct block_device *bd, struct hd_geometry *geo)
+static int virtblk_getgeo(struct gendisk *disk, struct hd_geometry *geo)
 {
-	struct virtio_blk *vblk = bd->bd_disk->private_data;
+	struct virtio_blk *vblk = disk->private_data;
 	int ret = 0;
 
 	mutex_lock(&vblk->vdev_mutex);
@@ -853,7 +853,7 @@ static int virtblk_getgeo(struct block_device *bd, struct hd_geometry *geo)
 		/* some standard values, similar to sd */
 		geo->heads = 1 << 6;
 		geo->sectors = 1 << 5;
-		geo->cylinders = get_capacity(bd->bd_disk) >> 11;
+		geo->cylinders = get_capacity(disk) >> 11;
 	}
 out:
 	mutex_unlock(&vblk->vdev_mutex);
@@ -976,9 +976,8 @@ static int init_vq(struct virtio_blk *vblk)
 		return -EINVAL;
 	}
 
-	num_vqs = min_t(unsigned int,
-			min_not_zero(num_request_queues, nr_cpu_ids),
-			num_vqs);
+	num_vqs = blk_mq_num_possible_queues(
+			min_not_zero(num_request_queues, num_vqs));
 
 	num_poll_vqs = min_t(unsigned int, poll_queues, num_vqs - 1);
 
@@ -1207,11 +1206,12 @@ static int virtblk_poll(struct blk_mq_hw_ctx *hctx, struct io_comp_batch *iob)
 
 	while ((vbr = virtqueue_get_buf(vq->vq, &len)) != NULL) {
 		struct request *req = blk_mq_rq_from_pdu(vbr);
+		u8 status = virtblk_vbr_status(vbr);
 
 		found++;
 		if (!blk_mq_complete_request_remote(req) &&
-		    !blk_mq_add_to_batch(req, iob, virtblk_vbr_status(vbr),
-						virtblk_complete_batch))
+		    !blk_mq_add_to_batch(req, iob, status != VIRTIO_BLK_S_OK,
+					 virtblk_complete_batch))
 			virtblk_request_done(req);
 	}
 
@@ -1682,7 +1682,7 @@ static int __init virtio_blk_init(void)
 {
 	int error;
 
-	virtblk_wq = alloc_workqueue("virtio-blk", 0, 0);
+	virtblk_wq = alloc_workqueue("virtio-blk", WQ_PERCPU, 0);
 	if (!virtblk_wq)
 		return -ENOMEM;
 

@@ -128,6 +128,16 @@ process running on the system, which is named after the process ID (PID).
 The link  'self'  points to  the process reading the file system. Each process
 subdirectory has the entries listed in Table 1-1.
 
+A process can read its own information from /proc/PID/* with no extra
+permissions. When reading /proc/PID/* information for other processes, reading
+process is required to have either CAP_SYS_PTRACE capability with
+PTRACE_MODE_READ access permissions, or, alternatively, CAP_PERFMON
+capability. This applies to all read-only information like `maps`, `environ`,
+`pagemap`, etc. The only exception is `mem` file due to its read-write nature,
+which requires CAP_SYS_PTRACE capabilities with more elevated
+PTRACE_MODE_ATTACH permissions; CAP_PERFMON capability does not grant access
+to /proc/PID/mem for other processes.
+
 Note that an open file descriptor to /proc/<pid> or to any of its
 contained files or subdirectories does not prevent <pid> being reused
 for some other process in the event that <pid> exits. Operations on
@@ -281,8 +291,9 @@ It's slow but very precise.
  HugetlbPages                size of hugetlb memory portions
  CoreDumping                 process's memory is currently being dumped
                              (killing the process may lead to a corrupted core)
- THP_enabled		     process is allowed to use THP (returns 0 when
-			     PR_SET_THP_DISABLE is set on the process
+ THP_enabled                 process is allowed to use THP (returns 0 when
+                             PR_SET_THP_DISABLE is set on the process to disable
+                             THP completely, not just partially)
  Threads                     number of threads
  SigQ                        number of signals queued/max. number for queue
  SigPnd                      bitmap of pending signals for the thread
@@ -502,9 +513,25 @@ process, its PSS will be 1500.  "Pss_Dirty" is the portion of PSS which
 consists of dirty pages.  ("Pss_Clean" is not included, but it can be
 calculated by subtracting "Pss_Dirty" from "Pss".)
 
-Note that even a page which is part of a MAP_SHARED mapping, but has only
-a single pte mapped, i.e.  is currently used by only one process, is accounted
-as private and not as shared.
+Traditionally, a page is accounted as "private" if it is mapped exactly once,
+and a page is accounted as "shared" when mapped multiple times, even when
+mapped in the same process multiple times. Note that this accounting is
+independent of MAP_SHARED.
+
+In some kernel configurations, the semantics of pages part of a larger
+allocation (e.g., THP) can differ: a page is accounted as "private" if all
+pages part of the corresponding large allocation are *certainly* mapped in the
+same process, even if the page is mapped multiple times in that process. A
+page is accounted as "shared" if any page page of the larger allocation
+is *maybe* mapped in a different process. In some cases, a large allocation
+might be treated as "maybe mapped by multiple processes" even though this
+is no longer the case.
+
+Some kernel configurations do not track the precise number of times a page part
+of a larger allocation is mapped. In this case, when calculating the PSS, the
+average number of mappings per page in this larger allocation might be used
+as an approximation for the number of mappings of a page. The PSS calculation
+will be imprecise in this case.
 
 "Referenced" indicates the amount of memory currently marked as referenced or
 accessed.
@@ -558,7 +585,6 @@ encoded manner. The codes are the following:
     ms    may share
     gd    stack segment growns down
     pf    pure PFN range
-    dw    disabled write to the mapped file
     lo    pages are locked in memory
     io    memory mapped I/O area
     sr    sequential read advise provided
@@ -581,8 +607,11 @@ encoded manner. The codes are the following:
     mt    arm64 MTE allocation tags are enabled
     um    userfaultfd missing tracking
     uw    userfaultfd wr-protect tracking
+    ui    userfaultfd minor fault
     ss    shadow/guarded control stack page
     sl    sealed
+    lf    lock on fault pages
+    dp    always lazily freeable mapping
     ==    =======================================
 
 Note that there is no guarantee that every flag and associated mnemonic will
@@ -685,6 +714,11 @@ Where:
 "mapping details" summarizes mapping data such as mapping type, page usage counters,
 node locality page counters (N0 == node0, N1 == node1, ...) and the kernel page
 size, in KB, that is backing the mapping up.
+
+Note that some kernel configurations do not track the precise number of times
+a page part of a larger allocation (e.g., THP) is mapped. In these
+configurations, "mapmax" might corresponds to the average number of mappings
+per page in such a larger allocation instead.
 
 1.2 Kernel data
 ---------------
@@ -975,6 +1009,19 @@ number, module (if originates from a loadable module) and the function calling
 the allocation. The number of bytes allocated and number of calls at each
 location are reported. The first line indicates the version of the file, the
 second line is the header listing fields in the file.
+If file version is 2.0 or higher then each line may contain additional
+<key>:<value> pairs representing extra information about the call site.
+For example if the counters are not accurate, the line will be appended with
+"accurate:no" pair.
+
+Supported markers in v2:
+accurate:no
+
+              Absolute values of the counters in this line are not accurate
+              because of the failure to allocate memory to track some of the
+              allocations made at this location.  Deltas in these counters are
+              accurate, therefore counters can be used to track allocation size
+              and count changes.
 
 Example output.
 
@@ -1060,6 +1107,8 @@ Example output. You may not have all of these fields.
     FilePmdMapped:         0 kB
     CmaTotal:              0 kB
     CmaFree:               0 kB
+    Unaccepted:            0 kB
+    Balloon:               0 kB
     HugePages_Total:       0
     HugePages_Free:        0
     HugePages_Rsvd:        0
@@ -1132,9 +1181,15 @@ Dirty
 Writeback
               Memory which is actively being written back to the disk
 AnonPages
-              Non-file backed pages mapped into userspace page tables
+              Non-file backed pages mapped into userspace page tables. Note that
+              some kernel configurations might consider all pages part of a
+              larger allocation (e.g., THP) as "mapped", as soon as a single
+              page is mapped.
 Mapped
-              files which have been mmapped, such as libraries
+              files which have been mmapped, such as libraries. Note that some
+              kernel configurations might consider all pages part of a larger
+              allocation (e.g., THP) as "mapped", as soon as a single page is
+              mapped.
 Shmem
               Total memory used by shared memory (shmem) and tmpfs
 KReclaimable
@@ -1155,12 +1210,14 @@ SecPageTables
               Memory consumed by secondary page tables, this currently includes
               KVM mmu and IOMMU allocations on x86 and arm64.
 NFS_Unstable
-              Always zero. Previous counted pages which had been written to
+              Always zero. Previously counted pages which had been written to
               the server, but has not been committed to stable storage.
 Bounce
-              Memory used for block device "bounce buffers"
+              Always zero. Previously memory used for block device
+              "bounce buffers".
 WritebackTmp
-              Memory used by FUSE for temporary writeback buffers
+              Always zero. Previously memory used by FUSE for temporary
+              writeback buffers.
 CommitLimit
               Based on the overcommit ratio ('vm.overcommit_ratio'),
               this is the total amount of  memory currently available to
@@ -1228,6 +1285,10 @@ CmaTotal
               Memory reserved for the Contiguous Memory Allocator (CMA)
 CmaFree
               Free remaining memory in the CMA reserves
+Unaccepted
+              Memory that has not been accepted by the guest
+Balloon
+              Memory returned to Host by VM Balloon Drivers
 HugePages_Total, HugePages_Free, HugePages_Rsvd, HugePages_Surp, Hugepagesize, Hugetlb
               See Documentation/admin-guide/mm/hugetlbpage.rst.
 DirectMap4k, DirectMap2M, DirectMap1G
@@ -2315,6 +2376,7 @@ The following mount options are supported:
 	hidepid=	Set /proc/<pid>/ access mode.
 	gid=		Set the group authorized to learn processes information.
 	subset=		Show only the specified subset of procfs.
+	pidns=		Specify a the namespace used by this procfs.
 	=========	========================================================
 
 hidepid=off or hidepid=0 means classic mode - everybody may access all
@@ -2346,6 +2408,13 @@ information about processes information, just add identd to this group.
 
 subset=pid hides all top level files and directories in the procfs that
 are not related to tasks.
+
+pidns= specifies a pid namespace (either as a string path to something like
+`/proc/$pid/ns/pid`, or a file descriptor when using `FSCONFIG_SET_FD`) that
+will be used by the procfs instance when translating pids. By default, procfs
+will use the calling process's active pid namespace. Note that the pid
+namespace of an existing procfs instance cannot be modified (attempting to do
+so will give an `-EBUSY` error).
 
 Chapter 5: Filesystem behavior
 ==============================

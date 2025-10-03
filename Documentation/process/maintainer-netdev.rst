@@ -311,6 +311,14 @@ to the mailing list, e.g.::
 Posting as one thread is discouraged because it confuses patchwork
 (as of patchwork 2.2.2).
 
+Co-posting selftests
+~~~~~~~~~~~~~~~~~~~~
+
+Selftests should be part of the same series as the code changes.
+Specifically for fixes both code change and related test should go into
+the same tree (the tests may lack a Fixes tag, which is expected).
+Mixing code changes and test changes in a single commit is discouraged.
+
 Preparing changes
 -----------------
 
@@ -399,7 +407,7 @@ Clean-up patches
 Netdev discourages patches which perform simple clean-ups, which are not in
 the context of other work. For example:
 
-* Addressing ``checkpatch.pl`` warnings
+* Addressing ``checkpatch.pl``, and other trivial coding style warnings
 * Addressing :ref:`Local variable ordering<rcs>` issues
 * Conversions to device-managed APIs (``devm_`` helpers)
 

@@ -2514,7 +2514,7 @@ void ixgbevf_down(struct ixgbevf_adapter *adapter)
 
 	ixgbevf_napi_disable_all(adapter);
 
-	del_timer_sync(&adapter->service_timer);
+	timer_delete_sync(&adapter->service_timer);
 
 	/* disable transmits in the hardware now that interrupts are off */
 	for (i = 0; i < adapter->num_tx_queues; i++) {
@@ -3176,8 +3176,8 @@ void ixgbevf_update_stats(struct ixgbevf_adapter *adapter)
  **/
 static void ixgbevf_service_timer(struct timer_list *t)
 {
-	struct ixgbevf_adapter *adapter = from_timer(adapter, t,
-						     service_timer);
+	struct ixgbevf_adapter *adapter = timer_container_of(adapter, t,
+							     service_timer);
 
 	/* Reset the timer */
 	mod_timer(&adapter->service_timer, (HZ * 2) + jiffies);
@@ -4323,7 +4323,7 @@ static int ixgbevf_resume(struct device *dev_d)
 	struct pci_dev *pdev = to_pci_dev(dev_d);
 	struct net_device *netdev = pci_get_drvdata(pdev);
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
-	u32 err;
+	int err;
 
 	adapter->hw.hw_addr = adapter->io_addr;
 	smp_mb__before_atomic();

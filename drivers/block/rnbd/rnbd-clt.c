@@ -942,11 +942,11 @@ static void rnbd_client_release(struct gendisk *gen)
 	rnbd_clt_put_dev(dev);
 }
 
-static int rnbd_client_getgeo(struct block_device *block_device,
+static int rnbd_client_getgeo(struct gendisk *disk,
 			      struct hd_geometry *geo)
 {
 	u64 size;
-	struct rnbd_clt_dev *dev = block_device->bd_disk->private_data;
+	struct rnbd_clt_dev *dev = disk->private_data;
 	struct queue_limits *limit = &dev->queue->limits;
 
 	size = dev->size * (limit->logical_block_size / SECTOR_SIZE);
@@ -1010,7 +1010,7 @@ static int rnbd_client_xfer_request(struct rnbd_clt_dev *dev,
 	 * See queue limits.
 	 */
 	if ((req_op(rq) != REQ_OP_DISCARD) && (req_op(rq) != REQ_OP_WRITE_ZEROES))
-		sg_cnt = blk_rq_map_sg(dev->queue, rq, iu->sgt.sgl);
+		sg_cnt = blk_rq_map_sg(rq, iu->sgt.sgl);
 
 	if (sg_cnt == 0)
 		sg_mark_end(&iu->sgt.sgl[0]);
@@ -1809,7 +1809,7 @@ static int __init rnbd_client_init(void)
 		unregister_blkdev(rnbd_client_major, "rnbd");
 		return err;
 	}
-	rnbd_clt_wq = alloc_workqueue("rnbd_clt_wq", 0, 0);
+	rnbd_clt_wq = alloc_workqueue("rnbd_clt_wq", WQ_PERCPU, 0);
 	if (!rnbd_clt_wq) {
 		pr_err("Failed to load module, alloc_workqueue failed.\n");
 		rnbd_clt_destroy_sysfs_files();

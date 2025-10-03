@@ -123,7 +123,7 @@ static int mtk_cpufreq_voltage_tracking(struct mtk_cpu_dvfs_info *info,
 						      soc_data->sram_max_volt);
 				return ret;
 			}
-		} else if (pre_vproc > new_vproc) {
+		} else {
 			vproc = max(new_vproc,
 				    pre_vsram - soc_data->max_volt_shift);
 			ret = regulator_set_voltage(proc_reg, vproc,
@@ -320,7 +320,6 @@ static int mtk_cpufreq_opp_notifier(struct notifier_block *nb,
 	struct dev_pm_opp *new_opp;
 	struct mtk_cpu_dvfs_info *info;
 	unsigned long freq, volt;
-	struct cpufreq_policy *policy;
 	int ret = 0;
 
 	info = container_of(nb, struct mtk_cpu_dvfs_info, opp_nb);
@@ -353,12 +352,12 @@ static int mtk_cpufreq_opp_notifier(struct notifier_block *nb,
 			}
 
 			dev_pm_opp_put(new_opp);
-			policy = cpufreq_cpu_get(info->opp_cpu);
-			if (policy) {
+
+			struct cpufreq_policy *policy __free(put_cpufreq_policy)
+				= cpufreq_cpu_get(info->opp_cpu);
+			if (policy)
 				cpufreq_driver_target(policy, freq / 1000,
 						      CPUFREQ_RELATION_L);
-				cpufreq_cpu_put(policy);
-			}
 		}
 	}
 
@@ -618,7 +617,6 @@ static struct cpufreq_driver mtk_cpufreq_driver = {
 	.exit = mtk_cpufreq_exit,
 	.register_em = cpufreq_register_em_with_opp,
 	.name = "mtk-cpufreq",
-	.attr = cpufreq_generic_attr,
 };
 
 static int mtk_cpufreq_probe(struct platform_device *pdev)
@@ -632,7 +630,7 @@ static int mtk_cpufreq_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, -ENODEV,
 				     "failed to get mtk cpufreq platform data\n");
 
-	for_each_possible_cpu(cpu) {
+	for_each_present_cpu(cpu) {
 		info = mtk_cpu_dvfs_info_lookup(cpu);
 		if (info)
 			continue;

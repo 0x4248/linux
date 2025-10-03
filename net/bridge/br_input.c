@@ -189,7 +189,8 @@ int br_handle_frame_finish(struct net *net, struct sock *sk, struct sk_buff *skb
 		if ((mdst || BR_INPUT_SKB_CB_MROUTERS_ONLY(skb)) &&
 		    br_multicast_querier_exists(brmctx, eth_hdr(skb), mdst)) {
 			if ((mdst && mdst->host_joined) ||
-			    br_multicast_is_router(brmctx, skb)) {
+			    br_multicast_is_router(brmctx, skb) ||
+			    br->dev->flags & IFF_ALLMULTI) {
 				local_rcv = true;
 				DEV_STATS_INC(br->dev, multicast);
 			}
@@ -201,6 +202,14 @@ int br_handle_frame_finish(struct net *net, struct sock *sk, struct sk_buff *skb
 		break;
 	case BR_PKT_UNICAST:
 		dst = br_fdb_find_rcu(br, eth_hdr(skb)->h_dest, vid);
+		if (unlikely(!dst && vid &&
+			     br_opt_get(br, BROPT_FDB_LOCAL_VLAN_0))) {
+			dst = br_fdb_find_rcu(br, eth_hdr(skb)->h_dest, 0);
+			if (dst &&
+			    (!test_bit(BR_FDB_LOCAL, &dst->flags) ||
+			     test_bit(BR_FDB_ADDED_BY_USER, &dst->flags)))
+				dst = NULL;
+		}
 		break;
 	default:
 		break;
