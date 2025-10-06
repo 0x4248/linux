@@ -1,5 +1,9 @@
-Linux kernel
-============
+0x4248 Fork: Linux kernel
+=========================
+
+NOTE: This is not the official branch of the linux kernel. To download the
+official version go to kernel.org
+
 
 There are several guides for kernel developers and users. These guides can
 be rendered in a number of formats, like HTML and PDF. Please read
