@@ -93,7 +93,7 @@ config HID_GENERIC
 	If unsure, say Y.
 
 config HID_HAPTIC
-	tristate "Haptic touchpad support"
+	bool "Haptic touchpad support"
 	default n
 	help
 	Support for touchpads with force sensors and haptic actuators instead of a
@@ -1171,7 +1171,7 @@ config GREENASIA_FF
 
 config HID_HYPERV_MOUSE
 	tristate "Microsoft Hyper-V mouse driver"
-	depends on HYPERV
+	depends on HYPERV_VMBUS
 	help
 	Select this option to enable the Hyper-V mouse driver.
 

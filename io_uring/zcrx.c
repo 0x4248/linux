@@ -928,74 +928,6 @@ static const struct memory_provider_ops io_uring_pp_zc_ops = {
 	.uninstall		= io_pp_uninstall,
 };
 
-#define IO_ZCRX_MAX_SYS_REFILL_BUFS		(1 << 16)
-#define IO_ZCRX_SYS_REFILL_BATCH		32
-
-static void io_return_buffers(struct io_zcrx_ifq *ifq,
-			      struct io_uring_zcrx_rqe *rqes, unsigned nr)
-{
-	int i;
-
-	for (i = 0; i < nr; i++) {
-		struct net_iov *niov;
-		netmem_ref netmem;
-
-		if (!io_parse_rqe(&rqes[i], ifq, &niov))
-			continue;
-
-		scoped_guard(spinlock_bh, &ifq->rq_lock) {
-			if (!io_zcrx_put_niov_uref(niov))
-				continue;
-		}
-
-		netmem = net_iov_to_netmem(niov);
-		if (!page_pool_unref_and_test(netmem))
-			continue;
-		io_zcrx_return_niov(niov);
-	}
-}
-
-int io_zcrx_return_bufs(struct io_ring_ctx *ctx,
-			void __user *arg, unsigned nr_arg)
-{
-	struct io_uring_zcrx_rqe rqes[IO_ZCRX_SYS_REFILL_BATCH];
-	struct io_uring_zcrx_rqe __user *user_rqes;
-	struct io_uring_zcrx_sync_refill zr;
-	struct io_zcrx_ifq *ifq;
-	unsigned nr, i;
-
-	if (nr_arg)
-		return -EINVAL;
-	if (copy_from_user(&zr, arg, sizeof(zr)))
-		return -EFAULT;
-	if (!zr.nr_entries || zr.nr_entries > IO_ZCRX_MAX_SYS_REFILL_BUFS)
-		return -EINVAL;
-	if (!mem_is_zero(&zr.__resv, sizeof(zr.__resv)))
-		return -EINVAL;
-
-	ifq = xa_load(&ctx->zcrx_ctxs, zr.zcrx_id);
-	if (!ifq)
-		return -EINVAL;
-	nr = zr.nr_entries;
-	user_rqes = u64_to_user_ptr(zr.rqes);
-
-	for (i = 0; i < nr;) {
-		unsigned batch = min(nr - i, IO_ZCRX_SYS_REFILL_BATCH);
-		size_t size = batch * sizeof(rqes[0]);
-
-		if (copy_from_user(rqes, user_rqes + i, size))
-			return i ? i : -EFAULT;
-		io_return_buffers(ifq, rqes, batch);
-
-		i += batch;
-
-		if (fatal_signal_pending(current))
-			return i;
-		cond_resched();
-	}
-	return nr;
-}
-
 static bool io_zcrx_queue_cqe(struct io_kiocb *req, struct net_iov *niov,
 			      struct io_zcrx_ifq *ifq, int off, int len)
 {
@@ -1079,6 +1011,7 @@ static ssize_t io_copy_page(struct io_copy_cache *cc, struct page *src_page,
 
 		cc->size -= n;
 		cc->offset += n;
+		src_offset += n;
 		len -= n;
 		copied += n;
 	}
@@ -1236,12 +1169,16 @@ io_zcrx_recv_skb(read_descriptor_t *desc, struct sk_buff *skb,
 
 		end = start + frag_iter->len;
 		if (offset < end) {
+			size_t count;
+
 			copy = end - offset;
 			if (copy > len)
 				copy = len;
 
 			off = offset - start;
+			count = desc->count;
 			ret = io_zcrx_recv_skb(desc, frag_iter, off, copy);
+			desc->count = count;
 			if (ret < 0)
 				goto out;
 
