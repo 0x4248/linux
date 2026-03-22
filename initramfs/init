@@ -1,0 +1,51 @@
+#!/bin/sh
+# /init  –  PID-1 for the testing initramfs
+# Mounts all virtual filesystems, populates /dev via mdev, probes devices,
+# prints a full system report, then drops to an interactive BusyBox shell.
+# Every step is logged to /var/log/init.log as well as the console.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 0. Very early setup – we have nothing yet, not even /proc
+# ---------------------------------------------------------------------------
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+
+mount -t proc     none /proc       && log "  /proc mounted"     || log "  /proc FAILED"
+mount -t sysfs    none /sys        && log "  /sys mounted"      || log "  /sys FAILED"
+mount -t devtmpfs none /dev  2>/dev/null \
+    || mount -t tmpfs -o size=4m,mode=0755 tmpfs /dev && log "  /dev mounted"
+mount -t tmpfs    -o size=32m,mode=1777 tmpfs /tmp  && log "  /tmp mounted" || true
+mount -t tmpfs    -o size=8m          tmpfs /run    && log "  /run mounted" || true
+
+mkdir -p /dev/pts /dev/shm
+mount -t devpts   -o gid=5,mode=620 devpts /dev/pts  && log "  /dev/pts mounted" || true
+mount -t tmpfs    -o size=4m        shmfs  /dev/shm   && log "  /dev/shm mounted" || true
+
+mkdir -p /var/log /var/run
+
+banner "Populating /dev (mdev)"
+if command -v mdev >/dev/null 2>&1; then
+    echo /sbin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
+    mdev -s
+    log "mdev -s done"
+else
+    log "mdev not found – /dev population may be incomplete"
+fi
+
+for node in \
+    "null   c 1 3" \
+    "zero   c 1 5" \
+    "full   c 1 7" \
+    "random c 1 8" \
+    "urandom c 1 9" \
+    "kmsg   c 1 11" \
+    "console c 5 1" \
+    "tty    c 5 0" \
+    "tty0   c 4 0" \
+    "ttyS0  c 4 64"
+do
+    set -- $node
+    [ -e "/dev/$1" ] || mknod "/dev/$1" "$2" "$3" "$4" 2>/dev/null || true
+done
+log "Static /dev nodes ensured"
